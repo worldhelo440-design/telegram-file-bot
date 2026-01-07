@@ -443,9 +443,15 @@ def index():
 def health():
     return "OK", 200
 
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def webhook():
+@app.route('/<token>', methods=['POST'])
+def webhook(token):
     """Handle incoming webhook updates"""
+    
+    # Verify token matches
+    if token != BOT_TOKEN:
+        logger.error(f"❌ Invalid token in webhook: {token}")
+        return "Unauthorized", 401
+    
     logger.info("🔔 Webhook received!")
     
     if not bot_app:
@@ -469,7 +475,6 @@ def webhook():
         return "Error", 500
     
     return "OK", 200
-
 def run_flask():
     """Run Flask"""
     logger.info(f"🌐 Flask starting on port {PORT}")
@@ -581,3 +586,4 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
