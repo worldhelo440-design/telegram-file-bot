@@ -9,6 +9,7 @@ from datetime import datetime
 from flask import Flask, request
 import asyncio
 from threading import Thread
+import requests
 
 # Configuration
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -422,6 +423,17 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"✅ File #{count} added to collection")
         await update.message.reply_text(f"✅ File #{count}")
 
+def keep_alive_sync():
+    """Keep the service alive by pinging itself every 10 minutes"""
+    while True:
+        time.sleep(600)  # 10 minutes
+        try:
+            if WEBHOOK_URL:
+                requests.get(f"{WEBHOOK_URL}/health", timeout=5)
+                logger.info("💓 Keep-alive ping sent")
+        except Exception as e:
+            logger.error(f"Keep-alive ping failed: {e}")
+
 # Flask routes
 @app.route('/')
 def index():
@@ -463,6 +475,19 @@ def run_flask():
     logger.info(f"🌐 Flask starting on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
+async def notify_admin_restart():
+    """Notify admin that bot restarted"""
+    try:
+        await asyncio.sleep(2)  # Wait for bot to be ready
+        await bot_instance.send_message(
+            chat_id=ADMIN_ID,
+            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.",
+            parse_mode='Markdown'
+        )
+        logger.info("✅ Admin notified of restart")
+    except Exception as e:
+        logger.error(f"❌ Could not notify admin: {e}")
+
 def main():
     """Main function"""
     global bot_instance, bot_app
@@ -477,15 +502,13 @@ def main():
     logger.info("=" * 60)
     
     if not WEBHOOK_URL:
-        logger.error("❌ CRITICAL: WEBHOOK_URL not set!")
-        logger.error("❌ Go to Render Dashboard → Environment → Add WEBHOOK_URL")
-        logger.error("❌ Example: https://your-service.onrender.com")
-        time.sleep(5)
+        logger.warning("⚠️ WEBHOOK_URL not set - webhook will not work!")
+        logger.warning("⚠️ Set it in Render: https://telegram-file-bot-uqp6.onrender.com")
     
     # Load data
     load_data()
     
-    # Create bot instance (no Updater - webhook only!)
+    # Create bot instance
     logger.info("🤖 Creating bot...")
     bot_instance = Bot(token=BOT_TOKEN)
     
@@ -514,8 +537,31 @@ def main():
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
         logger.info(f"🔗 Setting webhook: {webhook_url}")
+        
+        # DELETE old webhook first, then set new one
+        logger.info("🗑️ Deleting old webhook...")
+        loop.run_until_complete(bot_instance.delete_webhook(drop_pending_updates=True))
+        
+        # Wait a moment
+        time.sleep(2)
+        
+        # Set new webhook
         loop.run_until_complete(bot_instance.set_webhook(url=webhook_url))
         logger.info("✅ Webhook configured!")
+        
+        # Verify webhook
+        webhook_info = loop.run_until_complete(bot_instance.get_webhook_info())
+        logger.info(f"📡 Webhook URL: {webhook_info.url}")
+        logger.info(f"📡 Pending updates: {webhook_info.pending_update_count}")
+        
+        # Notify admin
+        loop.run_until_complete(notify_admin_restart())
+    
+    # Start keep-alive thread
+    if WEBHOOK_URL:
+        keep_alive_thread = Thread(target=keep_alive_sync, daemon=True)
+        keep_alive_thread.start()
+        logger.info("💓 Keep-alive thread started")
     
     logger.info("=" * 60)
     logger.info("✅ BOT IS READY!")
