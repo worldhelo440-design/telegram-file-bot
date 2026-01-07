@@ -37,8 +37,7 @@ logger = logging.getLogger(__name__)
 # Flask app
 app = Flask(__name__)
 
-# Bot instance
-bot_instance = None
+# Bot application
 bot_app = None
 
 def load_data():
@@ -462,7 +461,8 @@ def webhook(token):
         update_data = request.get_json(force=True)
         logger.info(f"📦 Update received")
         
-        update = Update.de_json(update_data, bot_instance)
+        # Use bot_app.bot which is already initialized
+        update = Update.de_json(update_data, bot_app.bot)
         
         # Process update synchronously
         import nest_asyncio
@@ -475,6 +475,7 @@ def webhook(token):
         return "Error", 500
     
     return "OK", 200
+
 def run_flask():
     """Run Flask"""
     logger.info(f"🌐 Flask starting on port {PORT}")
@@ -484,9 +485,9 @@ async def notify_admin_restart():
     """Notify admin that bot restarted"""
     try:
         await asyncio.sleep(2)  # Wait for bot to be ready
-        await bot_instance.send_message(
+        await bot_app.bot.send_message(
             chat_id=ADMIN_ID,
-            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.\n\n**NEW Commands:**\n• /startp\n• /stopp\n• /setcaption\n• /status\n• /listpayloads\n• /deletepayload",
+            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.\n\n**Commands:**\n• /startp <name>\n• /stopp\n• /setcaption\n• /status\n• /listpayloads\n• /deletepayload <code>",
             parse_mode='Markdown'
         )
         logger.info("✅ Admin notified of restart")
@@ -495,10 +496,10 @@ async def notify_admin_restart():
 
 def main():
     """Main function"""
-    global bot_instance, bot_app
+    global bot_app
     
     logger.info("=" * 60)
-    logger.info("🚀 TELEGRAM BOT STARTING - NEW VERSION")
+    logger.info("🚀 TELEGRAM BOT STARTING - FINAL VERSION")
     logger.info("=" * 60)
     logger.info(f"📝 BOT_TOKEN: {'SET ✅' if BOT_TOKEN else 'MISSING ❌'}")
     logger.info(f"👤 ADMIN_ID: {ADMIN_ID}")
@@ -508,17 +509,12 @@ def main():
     
     if not WEBHOOK_URL:
         logger.warning("⚠️ WEBHOOK_URL not set - webhook will not work!")
-        logger.warning("⚠️ Set it in Render: https://telegram-file-bot-uqp6.onrender.com")
     
     # Load data
     load_data()
     
-    # Create bot instance
-    logger.info("🤖 Creating bot...")
-    bot_instance = Bot(token=BOT_TOKEN)
-    
-    # Create application WITHOUT updater
-    logger.info("📌 Creating application...")
+    # Create application WITHOUT updater (webhook mode only)
+    logger.info("🤖 Creating bot application...")
     bot_app = Application.builder().token(BOT_TOKEN).updater(None).build()
     
     # Add handlers
@@ -533,7 +529,7 @@ def main():
     bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
     
     # Initialize
-    logger.info("⚙️ Initializing...")
+    logger.info("⚙️ Initializing bot...")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(bot_app.initialize())
@@ -543,19 +539,19 @@ def main():
         webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
         logger.info(f"🔗 Setting webhook: {webhook_url}")
         
-        # DELETE old webhook first, then set new one
+        # DELETE old webhook first
         logger.info("🗑️ Deleting old webhook...")
-        loop.run_until_complete(bot_instance.delete_webhook(drop_pending_updates=True))
+        loop.run_until_complete(bot_app.bot.delete_webhook(drop_pending_updates=True))
         
         # Wait a moment
         time.sleep(2)
         
         # Set new webhook
-        loop.run_until_complete(bot_instance.set_webhook(url=webhook_url))
+        loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_url))
         logger.info("✅ Webhook configured!")
         
         # Verify webhook
-        webhook_info = loop.run_until_complete(bot_instance.get_webhook_info())
+        webhook_info = loop.run_until_complete(bot_app.bot.get_webhook_info())
         logger.info(f"📡 Webhook URL: {webhook_info.url}")
         logger.info(f"📡 Pending updates: {webhook_info.pending_update_count}")
         
@@ -569,7 +565,7 @@ def main():
         logger.info("💓 Keep-alive thread started")
     
     logger.info("=" * 60)
-    logger.info("✅ BOT IS READY - NEW VERSION!")
+    logger.info("✅ BOT IS READY - FINAL VERSION!")
     logger.info("=" * 60)
     
     # Start Flask (blocks forever)
@@ -586,4 +582,3 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
-
