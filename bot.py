@@ -7,71 +7,114 @@ import json
 import os
 from datetime import datetime
 from flask import Flask, request
+import asyncio
 
 # Configuration
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8260566072:AAGqxekCKCnOS7irDoADYC7ZlPjM2FqzNIo")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1876238439"))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # Will be set on Render
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", 8080))
 
-# Storage
-STORAGE_FILE = "payload_data.json"
+# Storage files
+PAYLOAD_FILE = "payload_data.json"
+ACCESS_FILE = "user_access.json"
+CAPTION_FILE = "caption_data.json"
+
 payload_data = {}
-admin_sessions = {}
 user_access = {}
+admin_sessions = {}
+caption_data = {"start_caption": "", "end_caption": ""}
+deletion_tasks = {}
 
 # Setup logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flask app for webhook
+# Flask app
 flask_app = Flask(__name__)
 
 def load_data():
-    """Load payload data from file"""
-    global payload_data
-    if os.path.exists(STORAGE_FILE):
+    """Load all data from files"""
+    global payload_data, user_access, caption_data
+    
+    if os.path.exists(PAYLOAD_FILE):
         try:
-            with open(STORAGE_FILE, 'r') as f:
+            with open(PAYLOAD_FILE, 'r') as f:
                 payload_data = json.load(f)
-            logger.info(f"Loaded {len(payload_data)} payloads from storage")
+            logger.info(f"Loaded {len(payload_data)} payloads")
         except Exception as e:
-            logger.error(f"Error loading data: {e}")
+            logger.error(f"Error loading payloads: {e}")
             payload_data = {}
-    else:
-        payload_data = {}
+    
+    if os.path.exists(ACCESS_FILE):
+        try:
+            with open(ACCESS_FILE, 'r') as f:
+                user_access = json.load(f)
+            logger.info(f"Loaded user access data")
+        except Exception as e:
+            logger.error(f"Error loading access data: {e}")
+            user_access = {}
+    
+    if os.path.exists(CAPTION_FILE):
+        try:
+            with open(CAPTION_FILE, 'r') as f:
+                caption_data = json.load(f)
+            logger.info(f"Loaded captions")
+        except Exception as e:
+            logger.error(f"Error loading captions: {e}")
+            caption_data = {"start_caption": "", "end_caption": ""}
 
-def save_data():
-    """Save payload data to file"""
+def save_payloads():
+    """Save payload data"""
     try:
-        with open(STORAGE_FILE, 'w') as f:
+        with open(PAYLOAD_FILE, 'w') as f:
             json.dump(payload_data, f, indent=2)
-        logger.info("Data saved successfully")
     except Exception as e:
-        logger.error(f"Error saving data: {e}")
+        logger.error(f"Error saving payloads: {e}")
 
-def is_expired_for_user(payload, user_id):
-    """Check if payload has expired for a specific user"""
-    if payload not in payload_data:
-        return True
-    
-    if user_id not in user_access.get(payload, {}):
-        return False
-    
-    user_start_time = user_access[payload][user_id]
-    return time.time() > user_start_time + 3600
+def save_access():
+    """Save user access data"""
+    try:
+        with open(ACCESS_FILE, 'w') as f:
+            json.dump(user_access, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving access: {e}")
 
-def mark_user_access(payload, user_id):
-    """Mark when a user first accesses a payload"""
-    if payload not in user_access:
-        user_access[payload] = {}
+def save_captions():
+    """Save caption data"""
+    try:
+        with open(CAPTION_FILE, 'w') as f:
+            json.dump(caption_data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving captions: {e}")
+
+async def delete_user_messages(chat_id, message_ids):
+    """Delete messages from user's chat after 1 hour"""
+    await asyncio.sleep(3600)  # Wait 1 hour
     
-    if user_id not in user_access[payload]:
-        user_access[payload][user_id] = time.time()
-        logger.info(f"User {user_id} accessed payload {payload[:8]}...")
+    deleted = 0
+    for msg_id in message_ids:
+        try:
+            await application.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            deleted += 1
+        except Exception as e:
+            logger.error(f"Could not delete message {msg_id}: {e}")
+    
+    logger.info(f"Deleted {deleted}/{len(message_ids)} messages from chat {chat_id}")
+    
+    # Send notification that files were deleted
+    try:
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text="🔥 **Files Auto-Deleted!**\n\nYour 1-hour timer expired. Click the link again to get fresh copies!",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Could not send deletion notice: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     
     if context.args:
         payload = context.args[0]
@@ -80,45 +123,75 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid link!")
             return
         
-        if is_expired_for_user(payload, user_id):
-            await update.message.reply_text("❌ This link has expired for you!")
-            return
+        # Send start caption if set
+        start_msg = caption_data.get("start_caption", "")
+        if start_msg:
+            await update.message.reply_text(start_msg, parse_mode='Markdown')
         
-        mark_user_access(payload, user_id)
-        
-        user_start = user_access[payload][user_id]
-        remaining_seconds = int((user_start + 3600) - time.time())
-        remaining_minutes = remaining_seconds // 60
-        
+        # Send timer warning
         await update.message.reply_text(
-            f"⚠️ **IMPORTANT**: You have **{remaining_minutes} minutes** to download these files!\n"
-            f"Your personal timer started now.\n\n"
-            f"Sending {len(payload_data[payload]['files'])} files...",
+            f"⏰ **IMPORTANT: 1 HOUR AUTO-DELETE!**\n\n"
+            f"📦 Sending {len(payload_data[payload]['files'])} files...\n"
+            f"⚠️ **Files will be AUTOMATICALLY DELETED after 1 hour!**\n"
+            f"💾 Forward them to Saved Messages NOW!",
             parse_mode='Markdown'
         )
         
+        # Forward all files and collect message IDs
+        sent_message_ids = []
+        success_count = 0
+        
         for file_id in payload_data[payload]["files"]:
             try:
-                await context.bot.copy_message(
-                    chat_id=update.effective_chat.id,
+                sent_msg = await context.bot.copy_message(
+                    chat_id=chat_id,
                     from_chat_id=ADMIN_ID,
                     message_id=file_id
                 )
+                sent_message_ids.append(sent_msg.message_id)
+                success_count += 1
             except Exception as e:
                 logger.error(f"Error forwarding file: {e}")
         
-        await update.message.reply_text("✅ All files sent!")
+        # Send end caption if set, otherwise default message
+        end_msg = caption_data.get("end_caption", "")
+        if end_msg:
+            await update.message.reply_text(end_msg, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(
+                f"✅ **{success_count} files sent!**\n\n"
+                f"⚠️ **URGENT:** Forward these to Saved Messages NOW!\n"
+                f"🔥 Auto-delete in 60 minutes!\n"
+                f"🔄 Click the link again after deletion to get fresh copies.",
+                parse_mode='Markdown'
+            )
+        
+        # Schedule deletion after 1 hour
+        task_key = f"{chat_id}_{payload}_{time.time()}"
+        deletion_tasks[task_key] = asyncio.create_task(
+            delete_user_messages(chat_id, sent_message_ids)
+        )
+        
+        # Update access tracking
+        if payload not in user_access:
+            user_access[payload] = {}
+        user_access[payload][str(user_id)] = time.time()
+        save_access()
+        
+        logger.info(f"User {user_id} accessed payload {payload[:8]}, deletion scheduled")
+        
     else:
         if user_id == ADMIN_ID:
             await update.message.reply_text(
-                "👋 Welcome Admin!\n\n"
+                "👋 **Welcome Admin!**\n\n"
                 "**Admin Commands:**\n"
-                "/startpayload <name> - Start collecting files\n"
-                "/stoppayload - Finish and get share link\n"
-                "/status - Check active payloads\n"
-                "/listpayloads - List all payloads\n"
-                "/deletepayload <code> - Delete a payload\n\n"
-                "Forward files after /startpayload to add them.",
+                "• `/startp <name>` - Start collecting files\n"
+                "• `/stopp` - Finish and get share link\n"
+                "• `/setcaption` - Set start/end captions\n"
+                "• `/status` - Check active payloads\n"
+                "• `/listpayloads` - List all payloads\n"
+                "• `/deletepayload <code>` - Delete a payload\n\n"
+                "Forward files after /startp to add them.",
                 parse_mode='Markdown'
             )
         else:
@@ -128,19 +201,19 @@ async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ This command is for admins only!")
+        await update.message.reply_text("❌ Admin only!")
         return
     
     if not context.args:
-        await update.message.reply_text("❌ Usage: /startpayload <name>\nExample: /startpayload movies")
+        await update.message.reply_text("❌ Usage: /startp <name>\nExample: /startp movies")
         return
     
     payload_name = ' '.join(context.args)
     admin_sessions[user_id] = {"payload": payload_name, "files": []}
     
     await update.message.reply_text(
-        f"📁 Started collection: **{payload_name}**\n\n"
-        f"Forward files to me now. When done, send /stoppayload",
+        f"📁 **Started:** {payload_name}\n\n"
+        f"Forward files now. Send /stopp when done.",
         parse_mode='Markdown'
     )
 
@@ -148,35 +221,33 @@ async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ This command is for admins only!")
+        await update.message.reply_text("❌ Admin only!")
         return
     
     if user_id not in admin_sessions:
-        await update.message.reply_text("❌ No active collection! Use /startpayload first.")
+        await update.message.reply_text("❌ No active collection! Use /startp first.")
         return
     
     session = admin_sessions[user_id]
     
     if not session["files"]:
-        await update.message.reply_text("❌ No files were added! Forward files before stopping.")
+        await update.message.reply_text("❌ No files added! Forward files before stopping.")
         del admin_sessions[user_id]
         return
     
     unique_payload = secrets.token_urlsafe(16)
-    current_time = time.time()
     
     payload_data[unique_payload] = {
         "name": session['payload'],
         "files": session["files"],
-        "created_at": current_time,
+        "created_at": time.time(),
         "created_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    save_data()
+    save_payloads()
     
     bot_info = await context.bot.get_me()
-    bot_username = bot_info.username
-    share_link = f"https://t.me/{bot_username}?start={unique_payload}"
+    share_link = f"https://t.me/{bot_info.username}?start={unique_payload}"
     
     del admin_sessions[user_id]
     
@@ -184,10 +255,29 @@ async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ **Collection Created!**\n\n"
         f"📦 Name: {session['payload']}\n"
         f"📄 Files: {len(session['files'])}\n"
-        f"⏰ Each user gets: 1 hour from first access\n"
+        f"🔥 Auto-delete: 1 hour after sending\n"
+        f"🔄 Users can click again for fresh copies\n"
         f"🔑 Code: `{unique_payload}`\n\n"
-        f"🔗 **Share Link:**\n`{share_link}`\n\n"
-        f"Copy and share this link!",
+        f"🔗 **Share Link:**\n`{share_link}`",
+        parse_mode='Markdown'
+    )
+
+async def set_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    await update.message.reply_text(
+        "📝 **Set Captions**\n\n"
+        "Reply to this message with:\n"
+        "`START: your start message`\n"
+        "`END: your end message`\n\n"
+        "Example:\n"
+        "`START: Welcome! Here are your files.`\n"
+        "`END: ⚠️ Forward these immediately! Auto-delete in 1 hour!`\n\n"
+        "Send 'CLEAR' to remove captions.",
         parse_mode='Markdown'
     )
 
@@ -195,7 +285,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ This command is for admins only!")
+        await update.message.reply_text("❌ Admin only!")
         return
     
     if not payload_data:
@@ -207,7 +297,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for payload, data in list(payload_data.items())[:10]:
         access_count = len(user_access.get(payload, {}))
         status_text += f"• **{data.get('name', 'Unnamed')}**\n"
-        status_text += f"  Files: {len(data['files'])} | Accessed by: {access_count} users\n"
+        status_text += f"  Files: {len(data['files'])} | Users: {access_count}\n"
         status_text += f"  Code: `{payload[:12]}...`\n\n"
     
     await update.message.reply_text(status_text, parse_mode='Markdown')
@@ -216,7 +306,7 @@ async def list_payloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ This command is for admins only!")
+        await update.message.reply_text("❌ Admin only!")
         return
     
     if not payload_data:
@@ -239,7 +329,7 @@ async def delete_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ This command is for admins only!")
+        await update.message.reply_text("❌ Admin only!")
         return
     
     if not context.args:
@@ -258,21 +348,50 @@ async def delete_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if payload in user_access:
         del user_access[payload]
     
-    save_data()
+    save_payloads()
+    save_access()
     
-    await update.message.reply_text(f"✅ Deleted payload: **{name}**", parse_mode='Markdown')
+    await update.message.reply_text(f"✅ Deleted: **{name}**", parse_mode='Markdown')
 
-async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    if user_id != ADMIN_ID or user_id not in admin_sessions:
-        return
+    # Handle caption setting
+    if update.message.reply_to_message:
+        reply_text = update.message.reply_to_message.text
+        if reply_text and "Set Captions" in reply_text and user_id == ADMIN_ID:
+            text = update.message.text
+            
+            if text.upper() == 'CLEAR':
+                caption_data["start_caption"] = ""
+                caption_data["end_caption"] = ""
+                save_captions()
+                await update.message.reply_text("✅ Captions cleared!")
+                return
+            
+            if 'START:' in text:
+                start = text.split('START:')[1].split('END:')[0].strip() if 'START:' in text else ""
+                caption_data["start_caption"] = start
+            
+            if 'END:' in text:
+                end = text.split('END:')[1].strip() if 'END:' in text else ""
+                caption_data["end_caption"] = end
+            
+            save_captions()
+            await update.message.reply_text(
+                f"✅ **Captions Updated!**\n\n"
+                f"Start: {caption_data['start_caption'][:50]}...\n"
+                f"End: {caption_data['end_caption'][:50]}...",
+                parse_mode='Markdown'
+            )
+            return
     
-    message_id = update.message.message_id
-    admin_sessions[user_id]["files"].append(message_id)
-    file_count = len(admin_sessions[user_id]["files"])
-    
-    await update.message.reply_text(f"✅ File #{file_count} added!")
+    # Handle file collection
+    if user_id == ADMIN_ID and user_id in admin_sessions:
+        message_id = update.message.message_id
+        admin_sessions[user_id]["files"].append(message_id)
+        count = len(admin_sessions[user_id]["files"])
+        await update.message.reply_text(f"✅ File #{count} added!")
 
 # Flask routes
 @flask_app.route('/')
@@ -285,7 +404,7 @@ def health():
 
 @flask_app.route(f'/{BOT_TOKEN}', methods=['POST'])
 async def webhook():
-    """Handle incoming webhook updates"""
+    """Handle webhook updates"""
     update = Update.de_json(request.get_json(force=True), application.bot)
     await application.process_update(update)
     return "OK"
@@ -295,15 +414,16 @@ application = Application.builder().token(BOT_TOKEN).build()
 
 # Add handlers
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("startpayload", start_payload))
-application.add_handler(CommandHandler("stoppayload", stop_payload))
+application.add_handler(CommandHandler("startp", start_payload))
+application.add_handler(CommandHandler("stopp", stop_payload))
+application.add_handler(CommandHandler("setcaption", set_caption))
 application.add_handler(CommandHandler("status", status))
 application.add_handler(CommandHandler("listpayloads", list_payloads))
 application.add_handler(CommandHandler("deletepayload", delete_payload))
-application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_files))
+application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
 
 async def setup_webhook():
-    """Setup webhook"""
+    """Setup webhook and load data"""
     load_data()
     await application.initialize()
     await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
@@ -312,5 +432,5 @@ async def setup_webhook():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(setup_webhook())
-    logger.info(f"Starting Flask server on port {PORT}")
+    logger.info(f"Starting Flask on port {PORT}")
     flask_app.run(host='0.0.0.0', port=PORT)
