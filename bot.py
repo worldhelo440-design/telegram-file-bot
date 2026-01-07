@@ -206,7 +206,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "👋 **Welcome Admin!**\n\n"
                 "**Commands:**\n"
-                "• `/startp <n>` - Start collecting\n"
+                "• `/startp <name>` - Start collecting\n"
                 "• `/stopp` - Finish & get link\n"
                 "• `/setcaption` - Set messages\n"
                 "• `/status` - View payloads\n"
@@ -226,7 +226,7 @@ async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if not context.args:
-        await update.message.reply_text("❌ Usage: /startp <n>\nExample: /startp movies")
+        await update.message.reply_text("❌ Usage: /startp <name>\nExample: /startp movies")
         return
     
     payload_name = ' '.join(context.args)
@@ -481,7 +481,7 @@ async def notify_admin_restart():
         await asyncio.sleep(2)  # Wait for bot to be ready
         await bot_instance.send_message(
             chat_id=ADMIN_ID,
-            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.",
+            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.\n\n**NEW Commands:**\n• /startp\n• /stopp\n• /setcaption\n• /status\n• /listpayloads\n• /deletepayload",
             parse_mode='Markdown'
         )
         logger.info("✅ Admin notified of restart")
@@ -493,7 +493,7 @@ def main():
     global bot_instance, bot_app
     
     logger.info("=" * 60)
-    logger.info("🚀 TELEGRAM BOT STARTING")
+    logger.info("🚀 TELEGRAM BOT STARTING - NEW VERSION")
     logger.info("=" * 60)
     logger.info(f"📝 BOT_TOKEN: {'SET ✅' if BOT_TOKEN else 'MISSING ❌'}")
     logger.info(f"👤 ADMIN_ID: {ADMIN_ID}")
@@ -564,7 +564,7 @@ def main():
         logger.info("💓 Keep-alive thread started")
     
     logger.info("=" * 60)
-    logger.info("✅ BOT IS READY!")
+    logger.info("✅ BOT IS READY - NEW VERSION!")
     logger.info("=" * 60)
     
     # Start Flask (blocks forever)
