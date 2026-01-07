@@ -1,5 +1,5 @@
 import logging
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import time
 import secrets
@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 # Flask app
 app = Flask(__name__)
 
-# Bot application
+# Bot instance
+bot_instance = None
 bot_app = None
 
 def load_data():
@@ -204,7 +205,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "👋 **Welcome Admin!**\n\n"
                 "**Commands:**\n"
-                "• `/startp <name>` - Start collecting\n"
+                "• `/startp <n>` - Start collecting\n"
                 "• `/stopp` - Finish & get link\n"
                 "• `/setcaption` - Set messages\n"
                 "• `/status` - View payloads\n"
@@ -224,7 +225,7 @@ async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if not context.args:
-        await update.message.reply_text("❌ Usage: /startp <name>\nExample: /startp movies")
+        await update.message.reply_text("❌ Usage: /startp <n>\nExample: /startp movies")
         return
     
     payload_name = ' '.join(context.args)
@@ -441,16 +442,16 @@ def webhook():
     
     try:
         update_data = request.get_json(force=True)
-        logger.info(f"📦 Update data: {update_data}")
+        logger.info(f"📦 Update received")
         
-        update = Update.de_json(update_data, bot_app.bot)
+        update = Update.de_json(update_data, bot_instance)
         
         # Process update synchronously
         import nest_asyncio
         nest_asyncio.apply()
         asyncio.run(bot_app.process_update(update))
         
-        logger.info("✅ Update processed successfully")
+        logger.info("✅ Update processed")
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return "Error", 500
@@ -458,16 +459,16 @@ def webhook():
     return "OK", 200
 
 def run_flask():
-    """Run Flask in a separate thread"""
-    logger.info(f"🌐 Starting Flask on port {PORT}")
+    """Run Flask"""
+    logger.info(f"🌐 Flask starting on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 def main():
     """Main function"""
-    global bot_app
+    global bot_instance, bot_app
     
     logger.info("=" * 60)
-    logger.info("🚀 STARTING TELEGRAM BOT")
+    logger.info("🚀 TELEGRAM BOT STARTING")
     logger.info("=" * 60)
     logger.info(f"📝 BOT_TOKEN: {'SET ✅' if BOT_TOKEN else 'MISSING ❌'}")
     logger.info(f"👤 ADMIN_ID: {ADMIN_ID}")
@@ -475,15 +476,25 @@ def main():
     logger.info(f"🔌 PORT: {PORT}")
     logger.info("=" * 60)
     
+    if not WEBHOOK_URL:
+        logger.error("❌ CRITICAL: WEBHOOK_URL not set!")
+        logger.error("❌ Go to Render Dashboard → Environment → Add WEBHOOK_URL")
+        logger.error("❌ Example: https://your-service.onrender.com")
+        time.sleep(5)
+    
     # Load data
     load_data()
     
-    # Create bot application
-    logger.info("🤖 Creating bot application...")
-    bot_app = Application.builder().token(BOT_TOKEN).build()
+    # Create bot instance (no Updater - webhook only!)
+    logger.info("🤖 Creating bot...")
+    bot_instance = Bot(token=BOT_TOKEN)
+    
+    # Create application WITHOUT updater
+    logger.info("📌 Creating application...")
+    bot_app = Application.builder().token(BOT_TOKEN).updater(None).build()
     
     # Add handlers
-    logger.info("📌 Adding command handlers...")
+    logger.info("📌 Adding handlers...")
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("startp", start_payload))
     bot_app.add_handler(CommandHandler("stopp", stop_payload))
@@ -493,8 +504,8 @@ def main():
     bot_app.add_handler(CommandHandler("deletepayload", delete_payload))
     bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
     
-    # Initialize bot
-    logger.info("⚙️ Initializing bot...")
+    # Initialize
+    logger.info("⚙️ Initializing...")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(bot_app.initialize())
@@ -503,20 +514,18 @@ def main():
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
         logger.info(f"🔗 Setting webhook: {webhook_url}")
-        loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_url))
-        logger.info("✅ Webhook set successfully!")
-    else:
-        logger.error("❌ WEBHOOK_URL not configured!")
+        loop.run_until_complete(bot_instance.set_webhook(url=webhook_url))
+        logger.info("✅ Webhook configured!")
     
     logger.info("=" * 60)
     logger.info("✅ BOT IS READY!")
     logger.info("=" * 60)
     
-    # Start Flask
+    # Start Flask (blocks forever)
     run_flask()
 
 if __name__ == "__main__":
-    # Install nest_asyncio for better async handling
+    # Install nest_asyncio
     try:
         import nest_asyncio
     except ImportError:
