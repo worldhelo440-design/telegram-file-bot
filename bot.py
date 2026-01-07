@@ -38,7 +38,6 @@ app = Flask(__name__)
 
 # Bot application
 bot_app = None
-bot_loop = None
 
 def load_data():
     """Load all data from files"""
@@ -133,11 +132,13 @@ async def delete_user_messages(bot, chat_id, message_ids):
         logger.error(f"❌ Error in delete_user_messages: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"🎯 /start command received from user {update.effective_user.id}")
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
     if context.args:
         payload = context.args[0]
+        logger.info(f"📦 Payload requested: {payload}")
         
         if payload not in payload_data:
             await update.message.reply_text("❌ Invalid link!")
@@ -199,6 +200,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     else:
         if user_id == ADMIN_ID:
+            logger.info("👑 Admin accessed /start")
             await update.message.reply_text(
                 "👋 **Welcome Admin!**\n\n"
                 "**Commands:**\n"
@@ -214,6 +216,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("👋 Welcome! Send a valid link to access files.")
 
 async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"🎯 /startp command received")
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
@@ -227,6 +230,8 @@ async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payload_name = ' '.join(context.args)
     admin_sessions[user_id] = {"payload": payload_name, "files": []}
     
+    logger.info(f"✅ Started payload collection: {payload_name}")
+    
     await update.message.reply_text(
         f"📁 **Started:** {payload_name}\n\n"
         f"Forward files now. Send /stopp when done.",
@@ -234,6 +239,7 @@ async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"🎯 /stopp command received")
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
@@ -265,6 +271,8 @@ async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_info = await context.bot.get_me()
     share_link = f"https://t.me/{bot_info.username}?start={unique_payload}"
     
+    logger.info(f"✅ Payload created: {unique_payload} with {len(session['files'])} files")
+    
     del admin_sessions[user_id]
     
     await update.message.reply_text(
@@ -279,6 +287,7 @@ async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def set_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"🎯 /setcaption command received")
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
@@ -298,6 +307,7 @@ async def set_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"🎯 /status command received")
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
@@ -319,6 +329,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_text, parse_mode='Markdown')
 
 async def list_payloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"🎯 /listpayloads command received")
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
@@ -342,6 +353,7 @@ async def list_payloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(list_text, parse_mode='Markdown')
 
 async def delete_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"🎯 /deletepayload command received")
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
@@ -370,6 +382,7 @@ async def delete_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Deleted: **{name}**", parse_mode='Markdown')
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"📨 Message received from user {update.effective_user.id}")
     user_id = update.effective_user.id
     
     # Caption setting
@@ -405,12 +418,13 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_id = update.message.message_id
         admin_sessions[user_id]["files"].append(message_id)
         count = len(admin_sessions[user_id]["files"])
+        logger.info(f"✅ File #{count} added to collection")
         await update.message.reply_text(f"✅ File #{count}")
 
 # Flask routes
 @app.route('/')
 def index():
-    return "Bot running! 🚀"
+    return "Bot running! 🚀", 200
 
 @app.route('/health')
 def health():
@@ -419,48 +433,57 @@ def health():
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
     """Handle incoming webhook updates"""
-    if bot_app and bot_loop:
-        try:
-            update_data = request.get_json(force=True)
-            update = Update.de_json(update_data, bot_app.bot)
-            
-            # Schedule the update processing in the bot's event loop
-            asyncio.run_coroutine_threadsafe(
-                bot_app.process_update(update),
-                bot_loop
-            )
-        except Exception as e:
-            logger.error(f"❌ Webhook error: {e}")
-    return "OK"
+    logger.info("🔔 Webhook received!")
+    
+    if not bot_app:
+        logger.error("❌ Bot app not initialized!")
+        return "Bot not ready", 503
+    
+    try:
+        update_data = request.get_json(force=True)
+        logger.info(f"📦 Update data: {update_data}")
+        
+        update = Update.de_json(update_data, bot_app.bot)
+        
+        # Process update synchronously
+        import nest_asyncio
+        nest_asyncio.apply()
+        asyncio.run(bot_app.process_update(update))
+        
+        logger.info("✅ Update processed successfully")
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        return "Error", 500
+    
+    return "OK", 200
 
 def run_flask():
     """Run Flask in a separate thread"""
+    logger.info(f"🌐 Starting Flask on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
-async def run_bot():
-    """Keep the bot event loop running"""
-    global bot_loop
-    bot_loop = asyncio.get_running_loop()
-    
-    logger.info("🔄 Bot event loop started")
-    
-    # Keep the event loop alive
-    while True:
-        await asyncio.sleep(1)
-
-async def setup_bot():
-    """Initialize and setup the bot"""
+def main():
+    """Main function"""
     global bot_app
     
-    logger.info("🤖 Starting bot setup...")
+    logger.info("=" * 60)
+    logger.info("🚀 STARTING TELEGRAM BOT")
+    logger.info("=" * 60)
+    logger.info(f"📝 BOT_TOKEN: {'SET ✅' if BOT_TOKEN else 'MISSING ❌'}")
+    logger.info(f"👤 ADMIN_ID: {ADMIN_ID}")
+    logger.info(f"🌐 WEBHOOK_URL: {WEBHOOK_URL if WEBHOOK_URL else 'MISSING ❌'}")
+    logger.info(f"🔌 PORT: {PORT}")
+    logger.info("=" * 60)
     
     # Load data
     load_data()
     
-    # Create application
+    # Create bot application
+    logger.info("🤖 Creating bot application...")
     bot_app = Application.builder().token(BOT_TOKEN).build()
     
     # Add handlers
+    logger.info("📌 Adding command handlers...")
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("startp", start_payload))
     bot_app.add_handler(CommandHandler("stopp", stop_payload))
@@ -470,31 +493,36 @@ async def setup_bot():
     bot_app.add_handler(CommandHandler("deletepayload", delete_payload))
     bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
     
-    # Initialize
-    await bot_app.initialize()
-    await bot_app.start()
+    # Initialize bot
+    logger.info("⚙️ Initializing bot...")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(bot_app.initialize())
     
     # Set webhook
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
-        await bot_app.bot.set_webhook(url=webhook_url)
-        logger.info(f"✅ Webhook set: {webhook_url}")
+        logger.info(f"🔗 Setting webhook: {webhook_url}")
+        loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_url))
+        logger.info("✅ Webhook set successfully!")
     else:
-        logger.warning("⚠️ WEBHOOK_URL not set!")
+        logger.error("❌ WEBHOOK_URL not configured!")
     
-    logger.info("✅ Bot setup complete!")
+    logger.info("=" * 60)
+    logger.info("✅ BOT IS READY!")
+    logger.info("=" * 60)
     
-    # Keep bot running
-    await run_bot()
+    # Start Flask
+    run_flask()
 
 if __name__ == "__main__":
-    # Start Flask in background thread
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info(f"✅ Flask started on port {PORT}")
-    
-    # Run bot in main thread
+    # Install nest_asyncio for better async handling
     try:
-        asyncio.run(setup_bot())
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped")
+        import nest_asyncio
+    except ImportError:
+        import subprocess
+        import sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "nest_asyncio"])
+        import nest_asyncio
+    
+    main()
