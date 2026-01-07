@@ -6,15 +6,16 @@ import secrets
 import json
 import os
 from datetime import datetime
+from flask import Flask, request
 
-# Configuration - Load from environment or use defaults
+# Configuration
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8260566072:AAGqxekCKCnOS7irDoADYC7ZlPjM2FqzNIo")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1876238439"))
-
-# Persistent storage file
-STORAGE_FILE = "payload_data.json"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # Will be set on Render
+PORT = int(os.environ.get("PORT", 8080))
 
 # Storage
+STORAGE_FILE = "payload_data.json"
 payload_data = {}
 admin_sessions = {}
 user_access = {}
@@ -22,6 +23,9 @@ user_access = {}
 # Setup logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Flask app for webhook
+flask_app = Flask(__name__)
 
 def load_data():
     """Load payload data from file"""
@@ -270,24 +274,43 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"✅ File #{file_count} added!")
 
-def main():
-    """Main function to run the bot"""
+# Flask routes
+@flask_app.route('/')
+def index():
+    return "Bot is running! 🚀"
+
+@flask_app.route('/health')
+def health():
+    return "OK", 200
+
+@flask_app.route(f'/{BOT_TOKEN}', methods=['POST'])
+async def webhook():
+    """Handle incoming webhook updates"""
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
+    return "OK"
+
+# Initialize application
+application = Application.builder().token(BOT_TOKEN).build()
+
+# Add handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("startpayload", start_payload))
+application.add_handler(CommandHandler("stoppayload", stop_payload))
+application.add_handler(CommandHandler("status", status))
+application.add_handler(CommandHandler("listpayloads", list_payloads))
+application.add_handler(CommandHandler("deletepayload", delete_payload))
+application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_files))
+
+async def setup_webhook():
+    """Setup webhook"""
     load_data()
-    
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("startpayload", start_payload))
-    app.add_handler(CommandHandler("stoppayload", stop_payload))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("listpayloads", list_payloads))
-    app.add_handler(CommandHandler("deletepayload", delete_payload))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_files))
-    
-    print("✅ Bot is running!")
-    print("=" * 50)
-    
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.initialize()
+    await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
+    logger.info(f"Webhook set to: {WEBHOOK_URL}/{BOT_TOKEN}")
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(setup_webhook())
+    logger.info(f"Starting Flask server on port {PORT}")
+    flask_app.run(host='0.0.0.0', port=PORT)
