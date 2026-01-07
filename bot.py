@@ -38,6 +38,7 @@ app = Flask(__name__)
 
 # Bot application
 bot_app = None
+bot_loop = None
 
 def load_data():
     """Load all data from files"""
@@ -417,14 +418,35 @@ def health():
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    if bot_app:
-        update = Update.de_json(request.get_json(force=True), bot_app.bot)
-        asyncio.run(bot_app.process_update(update))
+    """Handle incoming webhook updates"""
+    if bot_app and bot_loop:
+        try:
+            update_data = request.get_json(force=True)
+            update = Update.de_json(update_data, bot_app.bot)
+            
+            # Schedule the update processing in the bot's event loop
+            asyncio.run_coroutine_threadsafe(
+                bot_app.process_update(update),
+                bot_loop
+            )
+        except Exception as e:
+            logger.error(f"❌ Webhook error: {e}")
     return "OK"
 
 def run_flask():
     """Run Flask in a separate thread"""
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+
+async def run_bot():
+    """Keep the bot event loop running"""
+    global bot_loop
+    bot_loop = asyncio.get_running_loop()
+    
+    logger.info("🔄 Bot event loop started")
+    
+    # Keep the event loop alive
+    while True:
+        await asyncio.sleep(1)
 
 async def setup_bot():
     """Initialize and setup the bot"""
@@ -450,6 +472,7 @@ async def setup_bot():
     
     # Initialize
     await bot_app.initialize()
+    await bot_app.start()
     
     # Set webhook
     if WEBHOOK_URL:
@@ -460,6 +483,9 @@ async def setup_bot():
         logger.warning("⚠️ WEBHOOK_URL not set!")
     
     logger.info("✅ Bot setup complete!")
+    
+    # Keep bot running
+    await run_bot()
 
 if __name__ == "__main__":
     # Start Flask in background thread
@@ -467,9 +493,8 @@ if __name__ == "__main__":
     flask_thread.start()
     logger.info(f"✅ Flask started on port {PORT}")
     
-    # Setup bot
-    asyncio.run(setup_bot())
-    
-    # Keep main thread alive
-    while True:
-        time.sleep(1)
+    # Run bot in main thread
+    try:
+        asyncio.run(setup_bot())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped")
