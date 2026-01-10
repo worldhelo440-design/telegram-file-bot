@@ -5,7 +5,7 @@ import time
 import secrets
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, request
 import asyncio
 from threading import Thread
@@ -21,11 +21,13 @@ PORT = int(os.environ.get("PORT", 8080))
 PAYLOAD_FILE = "payload_data.json"
 ACCESS_FILE = "user_access.json"
 CAPTION_FILE = "caption_data.json"
+DELETION_FILE = "scheduled_deletions.json"  # NEW: Track scheduled deletions
 
 payload_data = {}
 user_access = {}
 admin_sessions = {}
 caption_data = {"start_caption": "", "end_caption": ""}
+scheduled_deletions = {}  # NEW: {deletion_id: {chat_id, message_ids, delete_at, payload}}
 
 # Setup logging
 logging.basicConfig(
@@ -42,7 +44,7 @@ bot_app = None
 
 def load_data():
     """Load all data from files"""
-    global payload_data, user_access, caption_data
+    global payload_data, user_access, caption_data, scheduled_deletions
     
     if os.path.exists(PAYLOAD_FILE):
         try:
@@ -76,6 +78,18 @@ def load_data():
             caption_data = {"start_caption": "", "end_caption": ""}
     else:
         caption_data = {"start_caption": "", "end_caption": ""}
+    
+    # NEW: Load scheduled deletions
+    if os.path.exists(DELETION_FILE):
+        try:
+            with open(DELETION_FILE, 'r') as f:
+                scheduled_deletions = json.load(f)
+            logger.info(f"✅ Loaded {len(scheduled_deletions)} scheduled deletions")
+        except Exception as e:
+            logger.error(f"❌ Error loading deletions: {e}")
+            scheduled_deletions = {}
+    else:
+        scheduled_deletions = {}
 
 def save_payloads():
     """Save payload data"""
@@ -104,11 +118,39 @@ def save_captions():
     except Exception as e:
         logger.error(f"❌ Error saving captions: {e}")
 
-async def delete_user_messages(bot, chat_id, message_ids):
-    """Delete messages from user's chat after 1 hour"""
+def save_deletions():
+    """NEW: Save scheduled deletions"""
     try:
-        logger.info(f"⏰ Timer started for chat {chat_id} - {len(message_ids)} files")
-        await asyncio.sleep(3600)  # Wait 1 hour
+        with open(DELETION_FILE, 'w') as f:
+            json.dump(scheduled_deletions, f, indent=2)
+        logger.info("💾 Deletions saved")
+    except Exception as e:
+        logger.error(f"❌ Error saving deletions: {e}")
+
+async def check_and_delete_due_messages(bot):
+    """NEW: Check and process any overdue deletions"""
+    if not scheduled_deletions:
+        return
+    
+    current_time = datetime.now(timezone.utc).timestamp()
+    to_delete = []
+    
+    # Find overdue deletions
+    for deletion_id, data in scheduled_deletions.items():
+        if current_time >= data['delete_at']:
+            to_delete.append(deletion_id)
+    
+    if not to_delete:
+        return
+    
+    logger.info(f"⚡ Found {len(to_delete)} overdue deletions to process")
+    
+    # Process each overdue deletion
+    for deletion_id in to_delete:
+        data = scheduled_deletions[deletion_id]
+        chat_id = data['chat_id']
+        message_ids = data['message_ids']
+        payload = data.get('payload', 'unknown')
         
         deleted = 0
         for msg_id in message_ids:
@@ -118,7 +160,7 @@ async def delete_user_messages(bot, chat_id, message_ids):
             except Exception as e:
                 logger.error(f"Could not delete message {msg_id}: {e}")
         
-        logger.info(f"🔥 Deleted {deleted}/{len(message_ids)} messages from chat {chat_id}")
+        logger.info(f"🔥 Deleted {deleted}/{len(message_ids)} messages from chat {chat_id} (payload: {payload[:8]})")
         
         # Send notification
         try:
@@ -129,10 +171,18 @@ async def delete_user_messages(bot, chat_id, message_ids):
             )
         except Exception as e:
             logger.error(f"Could not send deletion notice: {e}")
-    except Exception as e:
-        logger.error(f"❌ Error in delete_user_messages: {e}")
+        
+        # Remove from scheduled deletions
+        del scheduled_deletions[deletion_id]
+    
+    # Save updated deletions
+    save_deletions()
+    logger.info(f"✅ Processed {len(to_delete)} overdue deletions")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Check for overdue deletions first
+    await check_and_delete_due_messages(context.bot)
+    
     logger.info(f"🎯 /start command received from user {update.effective_user.id}")
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -188,8 +238,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
         
-        # Schedule deletion
-        asyncio.create_task(delete_user_messages(context.bot, chat_id, sent_message_ids))
+        # NEW: Schedule deletion using UTC timestamp
+        deletion_id = f"{chat_id}_{int(time.time())}_{secrets.token_hex(4)}"
+        delete_at = datetime.now(timezone.utc).timestamp() + 3600  # 1 hour from now in UTC
+        
+        scheduled_deletions[deletion_id] = {
+            'chat_id': chat_id,
+            'message_ids': sent_message_ids,
+            'delete_at': delete_at,
+            'payload': payload,
+            'scheduled_date': datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        }
+        save_deletions()
+        
+        logger.info(f"⏰ Scheduled deletion {deletion_id} for {datetime.fromtimestamp(delete_at, timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
         # Track access
         if payload not in user_access:
@@ -210,13 +272,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• `/setcaption` - Set messages\n"
                 "• `/status` - View payloads\n"
                 "• `/listpayloads` - List all\n"
-                "• `/deletepayload <code>` - Delete one",
+                "• `/deletepayload <code>` - Delete one\n"
+                "• `/pending` - View scheduled deletions\n"
+                "• `/checkdeletions` - Process overdue deletions",
                 parse_mode='Markdown'
             )
         else:
             await update.message.reply_text("👋 Welcome! Send a valid link to access files.")
 
 async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Check deletions
+    await check_and_delete_due_messages(context.bot)
+    
     logger.info(f"🎯 /startp command received")
     user_id = update.effective_user.id
     
@@ -240,6 +307,9 @@ async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Check deletions
+    await check_and_delete_due_messages(context.bot)
+    
     logger.info(f"🎯 /stopp command received")
     user_id = update.effective_user.id
     
@@ -288,6 +358,9 @@ async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def set_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Check deletions
+    await check_and_delete_due_messages(context.bot)
+    
     logger.info(f"🎯 /setcaption command received")
     user_id = update.effective_user.id
     
@@ -308,6 +381,9 @@ async def set_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Check deletions
+    await check_and_delete_due_messages(context.bot)
+    
     logger.info(f"🎯 /status command received")
     user_id = update.effective_user.id
     
@@ -330,6 +406,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_text, parse_mode='Markdown')
 
 async def list_payloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Check deletions
+    await check_and_delete_due_messages(context.bot)
+    
     logger.info(f"🎯 /listpayloads command received")
     user_id = update.effective_user.id
     
@@ -354,6 +433,9 @@ async def list_payloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(list_text, parse_mode='Markdown')
 
 async def delete_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Check deletions
+    await check_and_delete_due_messages(context.bot)
+    
     logger.info(f"🎯 /deletepayload command received")
     user_id = update.effective_user.id
     
@@ -382,7 +464,70 @@ async def delete_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"✅ Deleted: **{name}**", parse_mode='Markdown')
 
+async def pending_deletions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW: View all scheduled deletions"""
+    # Check deletions first
+    await check_and_delete_due_messages(context.bot)
+    
+    logger.info(f"🎯 /pending command received")
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    if not scheduled_deletions:
+        await update.message.reply_text("📊 No pending deletions.")
+        return
+    
+    current_time = datetime.now(timezone.utc).timestamp()
+    pending_text = f"⏰ **Scheduled Deletions:** {len(scheduled_deletions)}\n\n"
+    
+    for deletion_id, data in list(scheduled_deletions.items())[:20]:
+        delete_at = data['delete_at']
+        time_left = int((delete_at - current_time) / 60)  # Minutes left
+        payload = data.get('payload', 'unknown')[:8]
+        chat_id = data['chat_id']
+        num_files = len(data['message_ids'])
+        
+        status = "⏳ Pending" if time_left > 0 else "⚡ OVERDUE"
+        
+        pending_text += f"• **Chat {chat_id}** | Payload: `{payload}`\n"
+        pending_text += f"  Files: {num_files} | {status}\n"
+        pending_text += f"  Time: {time_left} min\n\n"
+    
+    await update.message.reply_text(pending_text, parse_mode='Markdown')
+
+async def check_deletions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW: Manually trigger deletion check"""
+    logger.info(f"🎯 /checkdeletions command received")
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    await update.message.reply_text("⚡ Checking for overdue deletions...")
+    
+    before_count = len(scheduled_deletions)
+    await check_and_delete_due_messages(context.bot)
+    after_count = len(scheduled_deletions)
+    
+    processed = before_count - after_count
+    
+    if processed > 0:
+        await update.message.reply_text(
+            f"✅ Processed {processed} overdue deletion(s)!\n\n"
+            f"Remaining: {after_count}",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(f"✅ All clear! No overdue deletions.\n\nPending: {after_count}")
+
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Check deletions on every message
+    await check_and_delete_due_messages(context.bot)
+    
     logger.info(f"📨 Message received from user {update.effective_user.id}")
     user_id = update.effective_user.id
     
@@ -482,12 +627,16 @@ def run_flask():
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 async def notify_admin_restart():
-    """Notify admin that bot restarted"""
+    """Notify admin that bot restarted and check deletions"""
     try:
         await asyncio.sleep(2)  # Wait for bot to be ready
+        
+        # NEW: Check for overdue deletions on restart
+        await check_and_delete_due_messages(bot_app.bot)
+        
         await bot_app.bot.send_message(
             chat_id=ADMIN_ID,
-            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.\n\n**Commands:**\n• /startp <name>\n• /stopp\n• /setcaption\n• /status\n• /listpayloads\n• /deletepayload <code>",
+            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.\n\n**Commands:**\n• /startp <name>\n• /stopp\n• /setcaption\n• /status\n• /listpayloads\n• /deletepayload <code>\n• /pending - View deletions\n• /checkdeletions - Process overdue",
             parse_mode='Markdown'
         )
         logger.info("✅ Admin notified of restart")
@@ -499,7 +648,7 @@ def main():
     global bot_app
     
     logger.info("=" * 60)
-    logger.info("🚀 TELEGRAM BOT STARTING - FINAL VERSION")
+    logger.info("🚀 TELEGRAM BOT STARTING - ENHANCED VERSION")
     logger.info("=" * 60)
     logger.info(f"📝 BOT_TOKEN: {'SET ✅' if BOT_TOKEN else 'MISSING ❌'}")
     logger.info(f"👤 ADMIN_ID: {ADMIN_ID}")
@@ -526,6 +675,8 @@ def main():
     bot_app.add_handler(CommandHandler("status", status))
     bot_app.add_handler(CommandHandler("listpayloads", list_payloads))
     bot_app.add_handler(CommandHandler("deletepayload", delete_payload))
+    bot_app.add_handler(CommandHandler("pending", pending_deletions))  # NEW
+    bot_app.add_handler(CommandHandler("checkdeletions", check_deletions_command))  # NEW
     bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
     
     # Initialize
@@ -555,7 +706,7 @@ def main():
         logger.info(f"📡 Webhook URL: {webhook_info.url}")
         logger.info(f"📡 Pending updates: {webhook_info.pending_update_count}")
         
-        # Notify admin
+        # Notify admin (this will also check for overdue deletions)
         loop.run_until_complete(notify_admin_restart())
     
     # Start keep-alive thread
@@ -565,14 +716,14 @@ def main():
         logger.info("💓 Keep-alive thread started")
     
     logger.info("=" * 60)
-    logger.info("✅ BOT IS READY - FINAL VERSION!")
+    logger.info("✅ BOT IS READY - ENHANCED VERSION!")
     logger.info("=" * 60)
     
     # Start Flask (blocks forever)
     run_flask()
 
 if __name__ == "__main__":
-    # Install nest_asyncio
+    # Install nest_asyncio if not available
     try:
         import nest_asyncio
     except ImportError:
