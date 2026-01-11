@@ -10,6 +10,7 @@ from flask import Flask, request
 import asyncio
 from threading import Thread
 import requests
+import io
 
 # Configuration
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -21,13 +22,15 @@ PORT = int(os.environ.get("PORT", 8080))
 PAYLOAD_FILE = "payload_data.json"
 ACCESS_FILE = "user_access.json"
 CAPTION_FILE = "caption_data.json"
-DELETION_FILE = "scheduled_deletions.json"  # NEW: Track scheduled deletions
+DELETION_FILE = "scheduled_deletions.json"
+BACKUP_IDS_FILE = "telegram_backup_ids.json"  # NEW: Store Telegram message IDs
 
 payload_data = {}
 user_access = {}
 admin_sessions = {}
 caption_data = {"start_caption": "", "end_caption": ""}
-scheduled_deletions = {}  # NEW: {deletion_id: {chat_id, message_ids, delete_at, payload}}
+scheduled_deletions = {}
+telegram_backup_ids = {}  # NEW: {file_type: message_id}
 
 # Setup logging
 logging.basicConfig(
@@ -42,6 +45,89 @@ app = Flask(__name__)
 # Bot application
 bot_app = None
 
+def load_backup_ids():
+    """Load Telegram backup message IDs"""
+    global telegram_backup_ids
+    if os.path.exists(BACKUP_IDS_FILE):
+        try:
+            with open(BACKUP_IDS_FILE, 'r') as f:
+                telegram_backup_ids = json.load(f)
+            logger.info(f"✅ Loaded backup IDs: {telegram_backup_ids}")
+        except Exception as e:
+            logger.error(f"❌ Error loading backup IDs: {e}")
+            telegram_backup_ids = {}
+    else:
+        telegram_backup_ids = {}
+
+def save_backup_ids():
+    """Save Telegram backup message IDs"""
+    try:
+        with open(BACKUP_IDS_FILE, 'w') as f:
+            json.dump(telegram_backup_ids, f, indent=2)
+        logger.info("💾 Backup IDs saved")
+    except Exception as e:
+        logger.error(f"❌ Error saving backup IDs: {e}")
+
+async def backup_to_telegram(bot, file_type, data, filename):
+    """
+    Upload JSON data to Telegram as backup
+    file_type: 'payload', 'access', 'caption', 'deletion'
+    """
+    try:
+        # Convert data to JSON string
+        json_str = json.dumps(data, indent=2)
+        json_bytes = json_str.encode('utf-8')
+        
+        # Create file-like object
+        file_obj = io.BytesIO(json_bytes)
+        file_obj.name = filename
+        
+        # Send to admin
+        sent_message = await bot.send_document(
+            chat_id=ADMIN_ID,
+            document=file_obj,
+            caption=f"☁️ **Backup: {file_type.upper()}**\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n📦 Records: {len(data) if isinstance(data, dict) else 'N/A'}",
+            parse_mode='Markdown'
+        )
+        
+        # Store message ID
+        telegram_backup_ids[file_type] = sent_message.message_id
+        save_backup_ids()
+        
+        logger.info(f"☁️ Backed up {file_type} to Telegram (msg_id: {sent_message.message_id})")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to backup {file_type} to Telegram: {e}")
+        return False
+
+async def restore_from_telegram(bot, file_type):
+    """
+    Download and restore JSON data from Telegram
+    Returns: (success, data)
+    """
+    try:
+        if file_type not in telegram_backup_ids:
+            logger.warning(f"⚠️ No backup ID found for {file_type}")
+            return False, None
+        
+        message_id = telegram_backup_ids[file_type]
+        logger.info(f"📥 Restoring {file_type} from Telegram (msg_id: {message_id})")
+        
+        # Get the message
+        # Note: We need to get file from admin's chat
+        file = await bot.get_file(file_id=f"get_from_message_{message_id}")
+        
+        # Download file
+        file_bytes = await file.download_as_bytearray()
+        json_str = file_bytes.decode('utf-8')
+        data = json.loads(json_str)
+        
+        logger.info(f"✅ Restored {file_type} from Telegram")
+        return True, data
+    except Exception as e:
+        logger.error(f"❌ Failed to restore {file_type} from Telegram: {e}")
+        return False, None
+
 def load_data():
     """Load all data from files"""
     global payload_data, user_access, caption_data, scheduled_deletions
@@ -50,7 +136,7 @@ def load_data():
         try:
             with open(PAYLOAD_FILE, 'r') as f:
                 payload_data = json.load(f)
-            logger.info(f"✅ Loaded {len(payload_data)} payloads")
+            logger.info(f"✅ Loaded {len(payload_data)} payloads from local file")
         except Exception as e:
             logger.error(f"❌ Error loading payloads: {e}")
             payload_data = {}
@@ -61,7 +147,7 @@ def load_data():
         try:
             with open(ACCESS_FILE, 'r') as f:
                 user_access = json.load(f)
-            logger.info(f"✅ Loaded user access data")
+            logger.info(f"✅ Loaded user access data from local file")
         except Exception as e:
             logger.error(f"❌ Error loading access data: {e}")
             user_access = {}
@@ -72,31 +158,74 @@ def load_data():
         try:
             with open(CAPTION_FILE, 'r') as f:
                 caption_data = json.load(f)
-            logger.info(f"✅ Loaded captions")
+            logger.info(f"✅ Loaded captions from local file")
         except Exception as e:
             logger.error(f"❌ Error loading captions: {e}")
             caption_data = {"start_caption": "", "end_caption": ""}
     else:
         caption_data = {"start_caption": "", "end_caption": ""}
     
-    # NEW: Load scheduled deletions
     if os.path.exists(DELETION_FILE):
         try:
             with open(DELETION_FILE, 'r') as f:
                 scheduled_deletions = json.load(f)
-            logger.info(f"✅ Loaded {len(scheduled_deletions)} scheduled deletions")
+            logger.info(f"✅ Loaded {len(scheduled_deletions)} scheduled deletions from local file")
         except Exception as e:
             logger.error(f"❌ Error loading deletions: {e}")
             scheduled_deletions = {}
     else:
         scheduled_deletions = {}
 
+async def load_data_from_telegram(bot):
+    """Try to load data from Telegram backups first"""
+    global payload_data, user_access, caption_data, scheduled_deletions
+    
+    logger.info("☁️ Attempting to restore from Telegram backups...")
+    
+    restored_count = 0
+    
+    # Try to restore each file type
+    success, data = await restore_from_telegram(bot, 'payload')
+    if success and data:
+        payload_data = data
+        save_payloads()
+        restored_count += 1
+        logger.info(f"✅ Restored {len(payload_data)} payloads from Telegram")
+    
+    success, data = await restore_from_telegram(bot, 'access')
+    if success and data:
+        user_access = data
+        save_access()
+        restored_count += 1
+        logger.info(f"✅ Restored access data from Telegram")
+    
+    success, data = await restore_from_telegram(bot, 'caption')
+    if success and data:
+        caption_data = data
+        save_captions()
+        restored_count += 1
+        logger.info(f"✅ Restored captions from Telegram")
+    
+    success, data = await restore_from_telegram(bot, 'deletion')
+    if success and data:
+        scheduled_deletions = data
+        save_deletions()
+        restored_count += 1
+        logger.info(f"✅ Restored {len(scheduled_deletions)} deletions from Telegram")
+    
+    if restored_count > 0:
+        logger.info(f"🎉 Successfully restored {restored_count} file(s) from Telegram!")
+        return True
+    else:
+        logger.warning("⚠️ No data restored from Telegram, using local files")
+        return False
+
 def save_payloads():
     """Save payload data"""
     try:
         with open(PAYLOAD_FILE, 'w') as f:
             json.dump(payload_data, f, indent=2)
-        logger.info("💾 Payloads saved")
+        logger.info("💾 Payloads saved locally")
     except Exception as e:
         logger.error(f"❌ Error saving payloads: {e}")
 
@@ -105,7 +234,7 @@ def save_access():
     try:
         with open(ACCESS_FILE, 'w') as f:
             json.dump(user_access, f, indent=2)
-        logger.info("💾 Access data saved")
+        logger.info("💾 Access data saved locally")
     except Exception as e:
         logger.error(f"❌ Error saving access: {e}")
 
@@ -114,28 +243,27 @@ def save_captions():
     try:
         with open(CAPTION_FILE, 'w') as f:
             json.dump(caption_data, f, indent=2)
-        logger.info("💾 Captions saved")
+        logger.info("💾 Captions saved locally")
     except Exception as e:
         logger.error(f"❌ Error saving captions: {e}")
 
 def save_deletions():
-    """NEW: Save scheduled deletions"""
+    """Save scheduled deletions"""
     try:
         with open(DELETION_FILE, 'w') as f:
             json.dump(scheduled_deletions, f, indent=2)
-        logger.info("💾 Deletions saved")
+        logger.info("💾 Deletions saved locally")
     except Exception as e:
         logger.error(f"❌ Error saving deletions: {e}")
 
 async def check_and_delete_due_messages(bot):
-    """NEW: Check and process any overdue deletions"""
+    """Check and process any overdue deletions"""
     if not scheduled_deletions:
         return
     
     current_time = datetime.now(timezone.utc).timestamp()
     to_delete = []
     
-    # Find overdue deletions
     for deletion_id, data in scheduled_deletions.items():
         if current_time >= data['delete_at']:
             to_delete.append(deletion_id)
@@ -145,7 +273,6 @@ async def check_and_delete_due_messages(bot):
     
     logger.info(f"⚡ Found {len(to_delete)} overdue deletions to process")
     
-    # Process each overdue deletion
     for deletion_id in to_delete:
         data = scheduled_deletions[deletion_id]
         chat_id = data['chat_id']
@@ -162,7 +289,6 @@ async def check_and_delete_due_messages(bot):
         
         logger.info(f"🔥 Deleted {deleted}/{len(message_ids)} messages from chat {chat_id} (payload: {payload[:8]})")
         
-        # Send notification
         try:
             await bot.send_message(
                 chat_id=chat_id,
@@ -172,15 +298,14 @@ async def check_and_delete_due_messages(bot):
         except Exception as e:
             logger.error(f"Could not send deletion notice: {e}")
         
-        # Remove from scheduled deletions
         del scheduled_deletions[deletion_id]
     
-    # Save updated deletions
     save_deletions()
+    # Backup deletions to Telegram
+    await backup_to_telegram(bot_app.bot, 'deletion', scheduled_deletions, 'scheduled_deletions.json')
     logger.info(f"✅ Processed {len(to_delete)} overdue deletions")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Check for overdue deletions first
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"🎯 /start command received from user {update.effective_user.id}")
@@ -195,12 +320,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid link!")
             return
         
-        # Send start caption if exists
         start_msg = caption_data.get("start_caption", "")
         if start_msg:
             await update.message.reply_text(start_msg, parse_mode='Markdown')
         
-        # Send warning
         await update.message.reply_text(
             f"⏰ **IMPORTANT: 1 HOUR AUTO-DELETE!**\n\n"
             f"📦 Sending {len(payload_data[payload]['files'])} files...\n"
@@ -209,7 +332,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
-        # Send all files
         sent_message_ids = []
         success_count = 0
         
@@ -225,7 +347,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Error forwarding file: {e}")
         
-        # Send end caption or default message
         end_msg = caption_data.get("end_caption", "")
         if end_msg:
             await update.message.reply_text(end_msg, parse_mode='Markdown')
@@ -238,9 +359,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
         
-        # NEW: Schedule deletion using UTC timestamp
         deletion_id = f"{chat_id}_{int(time.time())}_{secrets.token_hex(4)}"
-        delete_at = datetime.now(timezone.utc).timestamp() + 3600  # 1 hour from now in UTC
+        delete_at = datetime.now(timezone.utc).timestamp() + 3600
         
         scheduled_deletions[deletion_id] = {
             'chat_id': chat_id,
@@ -251,9 +371,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         save_deletions()
         
-        logger.info(f"⏰ Scheduled deletion {deletion_id} for {datetime.fromtimestamp(delete_at, timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        logger.info(f"⏰ Scheduled deletion {deletion_id}")
         
-        # Track access
         if payload not in user_access:
             user_access[payload] = {}
         user_access[payload][str(user_id)] = time.time()
@@ -274,14 +393,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• `/listpayloads` - List all\n"
                 "• `/deletepayload <code>` - Delete one\n"
                 "• `/pending` - View scheduled deletions\n"
-                "• `/checkdeletions` - Process overdue deletions",
+                "• `/checkdeletions` - Process overdue\n\n"
+                "**☁️ Cloud Backup:**\n"
+                "• `/backupnow` - Backup all to Telegram\n"
+                "• `/restorefromcloud` - Restore from Telegram\n"
+                "• `/downloadjson` - Get current JSON\n"
+                "• `/uploadjson` - Upload JSON (reply to file)",
                 parse_mode='Markdown'
             )
         else:
             await update.message.reply_text("👋 Welcome! Send a valid link to access files.")
 
 async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Check deletions
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"🎯 /startp command received")
@@ -307,7 +430,6 @@ async def start_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Check deletions
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"🎯 /stopp command received")
@@ -339,6 +461,9 @@ async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     save_payloads()
     
+    # AUTO-BACKUP TO TELEGRAM
+    await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json')
+    
     bot_info = await context.bot.get_me()
     share_link = f"https://t.me/{bot_info.username}?start={unique_payload}"
     
@@ -352,13 +477,13 @@ async def stop_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📄 Files: {len(session['files'])}\n"
         f"🔥 Auto-delete: 1 hour after sending\n"
         f"🔄 Reusable: Users can click again\n"
-        f"🔑 Code: `{unique_payload}`\n\n"
+        f"🔑 Code: `{unique_payload}`\n"
+        f"☁️ Backed up to Telegram ✅\n\n"
         f"🔗 **Share Link:**\n`{share_link}`",
         parse_mode='Markdown'
     )
 
 async def set_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Check deletions
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"🎯 /setcaption command received")
@@ -381,7 +506,6 @@ async def set_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Check deletions
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"🎯 /status command received")
@@ -406,7 +530,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_text, parse_mode='Markdown')
 
 async def list_payloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Check deletions
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"🎯 /listpayloads command received")
@@ -433,7 +556,6 @@ async def list_payloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(list_text, parse_mode='Markdown')
 
 async def delete_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Check deletions
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"🎯 /deletepayload command received")
@@ -462,11 +584,12 @@ async def delete_payload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_payloads()
     save_access()
     
-    await update.message.reply_text(f"✅ Deleted: **{name}**", parse_mode='Markdown')
+    # Auto-backup after deletion
+    await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json')
+    
+    await update.message.reply_text(f"✅ Deleted: **{name}**\n☁️ Backup updated!", parse_mode='Markdown')
 
 async def pending_deletions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """NEW: View all scheduled deletions"""
-    # Check deletions first
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"🎯 /pending command received")
@@ -485,7 +608,7 @@ async def pending_deletions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     for deletion_id, data in list(scheduled_deletions.items())[:20]:
         delete_at = data['delete_at']
-        time_left = int((delete_at - current_time) / 60)  # Minutes left
+        time_left = int((delete_at - current_time) / 60)
         payload = data.get('payload', 'unknown')[:8]
         chat_id = data['chat_id']
         num_files = len(data['message_ids'])
@@ -499,7 +622,6 @@ async def pending_deletions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(pending_text, parse_mode='Markdown')
 
 async def check_deletions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """NEW: Manually trigger deletion check"""
     logger.info(f"🎯 /checkdeletions command received")
     user_id = update.effective_user.id
     
@@ -524,12 +646,143 @@ async def check_deletions_command(update: Update, context: ContextTypes.DEFAULT_
     else:
         await update.message.reply_text(f"✅ All clear! No overdue deletions.\n\nPending: {after_count}")
 
+async def backup_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually backup all data to Telegram"""
+    logger.info(f"🎯 /backupnow command received")
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    await update.message.reply_text("☁️ Starting backup to Telegram...")
+    
+    success_count = 0
+    
+    if await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json'):
+        success_count += 1
+    
+    if await backup_to_telegram(context.bot, 'access', user_access, 'user_access.json'):
+        success_count += 1
+    
+    if await backup_to_telegram(context.bot, 'caption', caption_data, 'caption_data.json'):
+        success_count += 1
+    
+    if await backup_to_telegram(context.bot, 'deletion', scheduled_deletions, 'scheduled_deletions.json'):
+        success_count += 1
+    
+    await update.message.reply_text(
+        f"✅ **Backup Complete!**\n\n"
+        f"📤 Uploaded {success_count}/4 files to Telegram\n"
+        f"☁️ Your data is now safe in the cloud!",
+        parse_mode='Markdown'
+    )
+
+async def restore_from_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually restore all data from Telegram"""
+    logger.info(f"🎯 /restorefromcloud command received")
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    await update.message.reply_text("☁️ Restoring from Telegram backups...")
+    
+    restored = await load_data_from_telegram(context.bot)
+    
+    if restored:
+        await update.message.reply_text(
+            f"✅ **Restore Complete!**\n\n"
+            f"📥 Data restored from Telegram cloud\n"
+            f"📦 Payloads: {len(payload_data)}\n"
+            f"⏰ Deletions: {len(scheduled_deletions)}",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ **No cloud backups found**\n\n"
+            f"Using local files instead.\n"
+            f"Use /backupnow to create cloud backups.",
+            parse_mode='Markdown'
+        )
+
+async def download_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send current JSON files to admin"""
+    logger.info(f"🎯 /downloadjson command received")
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    await update.message.reply_text("📥 Generating JSON files...")
+    
+    # Send payload data
+    json_str = json.dumps(payload_data, indent=2)
+    file_obj = io.BytesIO(json_str.encode('utf-8'))
+    file_obj.name = 'payload_data.json'
+    
+    await context.bot.send_document(
+        chat_id=ADMIN_ID,
+        document=file_obj,
+        caption=f"📦 **Payload Data**\n📊 Records: {len(payload_data)}",
+        parse_mode='Markdown'
+    )
+    
+    await update.message.reply_text("✅ JSON file sent!")
+async def upload_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Upload and set payload data from JSON file"""
+    logger.info(f"🎯 /uploadjson command received")
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    await update.message.reply_text(
+        "📤 **Upload JSON**\n\n"
+        "Reply to this message with your JSON file.\n"
+        "Supported: payload_data.json",
+        parse_mode='Markdown'
+    )
+
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Check deletions on every message
     await check_and_delete_due_messages(context.bot)
     
     logger.info(f"📨 Message received from user {update.effective_user.id}")
     user_id = update.effective_user.id
+    
+    # Handle JSON file upload
+    if update.message.document and user_id == ADMIN_ID:
+        if update.message.reply_to_message:
+            reply_text = update.message.reply_to_message.text or ""
+            if "Upload JSON" in reply_text:
+                doc = update.message.document
+                if doc.file_name.endswith('.json'):
+                    try:
+                        file = await context.bot.get_file(doc.file_id)
+                        file_bytes = await file.download_as_bytearray()
+                        json_str = file_bytes.decode('utf-8')
+                        new_data = json.loads(json_str)
+                        
+                        global payload_data
+                        payload_data = new_data
+                        save_payloads()
+                        
+                        # Backup to Telegram
+                        await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json')
+                        
+                        await update.message.reply_text(
+                            f"✅ **Payload data updated!**\n\n"
+                            f"📦 Loaded {len(payload_data)} payloads\n"
+                            f"☁️ Backed up to cloud",
+                            parse_mode='Markdown'
+                        )
+                        return
+                    except Exception as e:
+                        await update.message.reply_text(f"❌ Error: {str(e)}")
+                        return
     
     # Caption setting
     if update.message.reply_to_message:
@@ -541,7 +794,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption_data["start_caption"] = ""
                 caption_data["end_caption"] = ""
                 save_captions()
-                await update.message.reply_text("✅ Captions cleared!")
+                await backup_to_telegram(context.bot, 'caption', caption_data, 'caption_data.json')
+                await update.message.reply_text("✅ Captions cleared and backed up!")
                 return
             
             if 'START:' in text:
@@ -556,7 +810,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption_data["end_caption"] = parts[1].strip()
             
             save_captions()
-            await update.message.reply_text("✅ Captions updated!")
+            await backup_to_telegram(context.bot, 'caption', caption_data, 'caption_data.json')
+            await update.message.reply_text("✅ Captions updated and backed up!")
             return
     
     # File collection
@@ -591,7 +846,6 @@ def health():
 def webhook(token):
     """Handle incoming webhook updates"""
     
-    # Verify token matches
     if token != BOT_TOKEN:
         logger.error(f"❌ Invalid token in webhook: {token}")
         return "Unauthorized", 401
@@ -606,10 +860,8 @@ def webhook(token):
         update_data = request.get_json(force=True)
         logger.info(f"📦 Update received")
         
-        # Use bot_app.bot which is already initialized
         update = Update.de_json(update_data, bot_app.bot)
         
-        # Process update synchronously
         import nest_asyncio
         nest_asyncio.apply()
         asyncio.run(bot_app.process_update(update))
@@ -629,14 +881,13 @@ def run_flask():
 async def notify_admin_restart():
     """Notify admin that bot restarted and check deletions"""
     try:
-        await asyncio.sleep(2)  # Wait for bot to be ready
+        await asyncio.sleep(2)
         
-        # NEW: Check for overdue deletions on restart
         await check_and_delete_due_messages(bot_app.bot)
         
         await bot_app.bot.send_message(
             chat_id=ADMIN_ID,
-            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.\n\n**Commands:**\n• /startp <name>\n• /stopp\n• /setcaption\n• /status\n• /listpayloads\n• /deletepayload <code>\n• /pending - View deletions\n• /checkdeletions - Process overdue",
+            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.\n\n**Commands:**\n• /startp <name>\n• /stopp\n• /setcaption\n• /status\n• /listpayloads\n• /deletepayload <code>\n• /pending\n• /checkdeletions\n\n**☁️ Cloud Backup:**\n• /backupnow\n• /restorefromcloud\n• /downloadjson\n• /uploadjson",
             parse_mode='Markdown'
         )
         logger.info("✅ Admin notified of restart")
@@ -648,7 +899,7 @@ def main():
     global bot_app
     
     logger.info("=" * 60)
-    logger.info("🚀 TELEGRAM BOT STARTING - ENHANCED VERSION")
+    logger.info("🚀 TELEGRAM BOT STARTING - CLOUD BACKUP VERSION")
     logger.info("=" * 60)
     logger.info(f"📝 BOT_TOKEN: {'SET ✅' if BOT_TOKEN else 'MISSING ❌'}")
     logger.info(f"👤 ADMIN_ID: {ADMIN_ID}")
@@ -659,10 +910,13 @@ def main():
     if not WEBHOOK_URL:
         logger.warning("⚠️ WEBHOOK_URL not set - webhook will not work!")
     
-    # Load data
+    # Load backup IDs first
+    load_backup_ids()
+    
+    # Load local data
     load_data()
     
-    # Create application WITHOUT updater (webhook mode only)
+    # Create application
     logger.info("🤖 Creating bot application...")
     bot_app = Application.builder().token(BOT_TOKEN).updater(None).build()
     
@@ -675,8 +929,12 @@ def main():
     bot_app.add_handler(CommandHandler("status", status))
     bot_app.add_handler(CommandHandler("listpayloads", list_payloads))
     bot_app.add_handler(CommandHandler("deletepayload", delete_payload))
-    bot_app.add_handler(CommandHandler("pending", pending_deletions))  # NEW
-    bot_app.add_handler(CommandHandler("checkdeletions", check_deletions_command))  # NEW
+    bot_app.add_handler(CommandHandler("pending", pending_deletions))
+    bot_app.add_handler(CommandHandler("checkdeletions", check_deletions_command))
+    bot_app.add_handler(CommandHandler("backupnow", backup_now))
+    bot_app.add_handler(CommandHandler("restorefromcloud", restore_from_cloud))
+    bot_app.add_handler(CommandHandler("downloadjson", download_json))
+    bot_app.add_handler(CommandHandler("uploadjson", upload_json))
     bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
     
     # Initialize
@@ -685,41 +943,39 @@ def main():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(bot_app.initialize())
     
+    # Try to restore from Telegram cloud
+    logger.info("☁️ Checking for cloud backups...")
+    loop.run_until_complete(load_data_from_telegram(bot_app.bot))
+    
     # Set webhook
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
         logger.info(f"🔗 Setting webhook: {webhook_url}")
         
-        # DELETE old webhook first
         logger.info("🗑️ Deleting old webhook...")
         loop.run_until_complete(bot_app.bot.delete_webhook(drop_pending_updates=True))
         
-        # Wait a moment
         time.sleep(2)
         
-        # Set new webhook
         loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_url))
         logger.info("✅ Webhook configured!")
         
-        # Verify webhook
         webhook_info = loop.run_until_complete(bot_app.bot.get_webhook_info())
         logger.info(f"📡 Webhook URL: {webhook_info.url}")
         logger.info(f"📡 Pending updates: {webhook_info.pending_update_count}")
         
-        # Notify admin (this will also check for overdue deletions)
         loop.run_until_complete(notify_admin_restart())
     
-    # Start keep-alive thread
+    # Start keep-alive
     if WEBHOOK_URL:
         keep_alive_thread = Thread(target=keep_alive_sync, daemon=True)
         keep_alive_thread.start()
         logger.info("💓 Keep-alive thread started")
     
     logger.info("=" * 60)
-    logger.info("✅ BOT IS READY - ENHANCED VERSION!")
+    logger.info("✅ BOT IS READY - CLOUD BACKUP ENABLED!")
     logger.info("=" * 60)
     
-    # Start Flask (blocks forever)
     run_flask()
 
 if __name__ == "__main__":
