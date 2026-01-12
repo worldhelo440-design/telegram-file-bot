@@ -897,9 +897,29 @@ async def notify_admin_restart():
         
         await check_and_delete_due_messages(bot_app.bot)
         
+        # Fixed message with proper Markdown escaping
+        message = (
+            "🔄 **Bot Restarted!**\n\n"
+            "All systems online and ready.\n\n"
+            "**Commands:**\n"
+            "• /startp <name>\n"
+            "• /stopp\n"
+            "• /setcaption\n"
+            "• /status\n"
+            "• /listpayloads\n"
+            "• /deletepayload <code>\n"
+            "• /pending\n"
+            "• /checkdeletions\n\n"
+            "**Cloud Backup:**\n"
+            "• /backupnow\n"
+            "• /restorefromcloud\n"
+            "• /downloadjson\n"
+            "• /uploadjson"
+        )
+        
         await bot_app.bot.send_message(
             chat_id=ADMIN_ID,
-            text="🔄 **Bot Restarted!**\n\nAll systems online and ready.\n\n**Commands:**\n• /startp <name>\n• /stopp\n• /setcaption\n• /status\n• /listpayloads\n• /deletepayload <code>\n• /pending\n• /checkdeletions\n\n**☁️ Cloud Backup:**\n• /backupnow\n• /restorefromcloud\n• /downloadjson\n• /uploadjson",
+            text=message,
             parse_mode='Markdown'
         )
         logger.info("✅ Admin notified of restart")
@@ -1001,6 +1021,7 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
 
 
 
