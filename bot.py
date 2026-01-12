@@ -731,7 +731,10 @@ async def download_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await update.message.reply_text("✅ JSON file sent!")
-    
+
+
+
+
 async def upload_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Upload and set payload data from JSON file"""
     logger.info(f"🎯 /uploadjson command received")
@@ -990,6 +993,7 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
 
 
 
