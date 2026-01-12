@@ -744,12 +744,16 @@ async def upload_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Admin only!")
         return
     
-    # Fixed message without problematic Markdown
     await update.message.reply_text(
         "📤 Upload JSON File\n\n"
         "Send your payload_data.json file now.\n"
-        "I'll process it automatically.",
-        parse_mode=None  # No parsing to avoid errors
+        "I'll process it automatically.\n\n"
+        "Supported files:\n"
+        "• payload_data.json\n"
+        "• caption_data.json\n"
+        "• user_access.json\n"
+        "• scheduled_deletions.json",
+        parse_mode=None
     )
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -758,13 +762,16 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"📨 Message received from user {update.effective_user.id}")
     user_id = update.effective_user.id
     
-    # Handle JSON file upload - IMPROVED DETECTION
+    # Handle JSON file upload - AUTOMATIC DETECTION
     if update.message.document and user_id == ADMIN_ID:
         doc = update.message.document
         
         # Check if it's a JSON file
         if doc.file_name and doc.file_name.endswith('.json'):
             logger.info(f"📄 JSON file received: {doc.file_name}")
+            
+            # Show processing message
+            processing_msg = await update.message.reply_text("⏳ Processing JSON file...")
             
             try:
                 # Download and parse JSON
@@ -773,33 +780,68 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 json_str = file_bytes.decode('utf-8')
                 new_data = json.loads(json_str)
                 
-                # Update payload data
-                global payload_data
-                payload_data = new_data
-                save_payloads()
+                # Determine file type and update accordingly
+                if 'name' in str(new_data) and 'files' in str(new_data):
+                    # It's payload data
+                    global payload_data
+                    old_count = len(payload_data)
+                    payload_data = new_data
+                    save_payloads()
+                    
+                    # Backup to Telegram
+                    await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json')
+                    
+                    logger.info(f"✅ Loaded {len(payload_data)} payloads from uploaded file")
+                    
+                    # Delete processing message
+                    await processing_msg.delete()
+                    
+                    # Send success message
+                    await update.message.reply_text(
+                        f"✅ Payload Data Uploaded!\n\n"
+                        f"📦 Previous: {old_count} payloads\n"
+                        f"📦 New: {len(payload_data)} payloads\n"
+                        f"☁️ Backed up to Telegram cloud\n\n"
+                        f"🚀 Bot is ready to use!",
+                        parse_mode=None
+                    )
+                    return
                 
-                # Backup to Telegram
-                await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json')
+                elif 'start_caption' in new_data or 'end_caption' in new_data:
+                    # It's caption data
+                    global caption_data
+                    caption_data = new_data
+                    save_captions()
+                    await backup_to_telegram(context.bot, 'caption', caption_data, 'caption_data.json')
+                    
+                    await processing_msg.delete()
+                    await update.message.reply_text(
+                        "✅ Caption Data Uploaded!\n\n"
+                        "☁️ Backed up to cloud",
+                        parse_mode=None
+                    )
+                    return
                 
-                logger.info(f"✅ Loaded {len(payload_data)} payloads from uploaded file")
-                
-                # Send success message without Markdown
-                await update.message.reply_text(
-                    f"✅ Payload data updated!\n\n"
-                    f"📦 Loaded {len(payload_data)} payloads\n"
-                    f"☁️ Backed up to cloud",
-                    parse_mode=None
-                )
-                return
-                
+                else:
+                    # Unknown JSON format
+                    await processing_msg.delete()
+                    await update.message.reply_text(
+                        "⚠️ Unknown JSON format!\n\n"
+                        "Expected: payload_data.json or caption_data.json"
+                    )
+                    return
+                    
             except json.JSONDecodeError as e:
                 logger.error(f"❌ Invalid JSON: {e}")
+                await processing_msg.delete()
                 await update.message.reply_text(
-                    f"❌ Invalid JSON file!\n\nError: {str(e)}"
+                    f"❌ Invalid JSON file!\n\n"
+                    f"Error: {str(e)}"
                 )
                 return
             except Exception as e:
                 logger.error(f"❌ Upload error: {e}")
+                await processing_msg.delete()
                 await update.message.reply_text(f"❌ Error: {str(e)}")
                 return
     
@@ -840,7 +882,6 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = len(admin_sessions[user_id]["files"])
         logger.info(f"✅ File #{count} added to collection")
         await update.message.reply_text(f"✅ File #{count}")
-        
 
 def keep_alive_sync():
     """Keep the service alive by pinging itself every 10 minutes"""
@@ -906,41 +947,63 @@ def run_flask():
     logger.info(f"🌐 Flask starting on port {PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
-async def notify_admin_restart():
-    """Notify admin that bot restarted and check deletions"""
-    try:
-        await asyncio.sleep(2)
-        
-        await check_and_delete_due_messages(bot_app.bot)
-        
-        # Fixed message without problematic Markdown
-        message = (
-            "🔄 Bot Restarted!\n\n"
-            "All systems online and ready.\n\n"
-            "Commands:\n"
-            "• /startp - Start collection\n"
-            "• /stopp - Finish collection\n"
-            "• /setcaption - Set messages\n"
-            "• /status - View payloads\n"
-            "• /listpayloads - List all\n"
-            "• /deletepayload - Delete one\n"
-            "• /pending - View deletions\n"
-            "• /checkdeletions - Process overdue\n\n"
-            "Cloud Backup:\n"
-            "• /backupnow - Backup all\n"
-            "• /restorefromcloud - Restore\n"
-            "• /downloadjson - Download\n"
-            "• /uploadjson - Upload JSON"
-        )
+
+        if has_data:
+            # Bot has existing data
+            message = (
+                "🔄 Bot Restarted!\n\n"
+                f"📦 Current payloads: {len(payload_data)}\n"
+                f"⏰ Pending deletions: {len(scheduled_deletions)}\n\n"
+                "All systems online and ready.\n\n"
+                "Commands:\n"
+                "• /startp - Start collection\n"
+                "• /stopp - Finish collection\n"
+                "• /status - View payloads\n"
+                "• /listpayloads - List all\n"
+                "• /uploadjson - Upload new data\n"
+                "• /backupnow - Backup to cloud\n"
+                "• /downloadjson - Download current data"
+            )
+        else:
+            # No data found - ask for upload
+            message = (
+                "🔄 Bot Restarted!\n\n"
+                "⚠️ No payload data found!\n\n"
+                "📤 UPLOAD YOUR JSON FILE NOW\n\n"
+                "Send your payload_data.json file\n"
+                "within the next 60 seconds.\n\n"
+                "I'll process it automatically."
+            )
         
         await bot_app.bot.send_message(
             chat_id=ADMIN_ID,
             text=message,
-            parse_mode=None  # No parsing to avoid errors
+            parse_mode=None
         )
         logger.info("✅ Admin notified of restart")
+        
+        # If no data, send a follow-up reminder after 30 seconds
+        if not has_data:
+            await asyncio.sleep(30)
+            
+            # Check again if data was uploaded
+            if len(payload_data) == 0:
+                await bot_app.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=(
+                        "⏰ 30 seconds left!\n\n"
+                        "📤 Send payload_data.json file now\n"
+                        "or use /downloadjson from old bot\n\n"
+                        "Bot is waiting..."
+                    ),
+                    parse_mode=None
+                )
+                logger.info("⏰ Sent upload reminder")
+                
     except Exception as e:
         logger.error(f"❌ Could not notify admin: {e}")
+
+
 
 def main():
     """Main function"""
@@ -1037,6 +1100,7 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
 
 
 
