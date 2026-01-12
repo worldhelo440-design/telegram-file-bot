@@ -861,19 +861,27 @@ def webhook(token):
         return "Bot not ready", 503
     
     try:
-        update_data = request.get_json(force=True)
-        logger.info(f"📦 Update received")
-        
-        update = Update.de_json(update_data, bot_app.bot)
-        
-        import nest_asyncio
-        nest_asyncio.apply()
-        asyncio.run(bot_app.process_update(update))
-        
-        logger.info("✅ Update processed")
-    except Exception as e:
-        logger.error(f"❌ Webhook error: {e}", exc_info=True)
-        return "Error", 500
+    update_data = request.get_json(force=True)
+    logger.info(f"📦 Update received")
+    
+    update = Update.de_json(update_data, bot_app.bot)
+    
+    # Use nest_asyncio to allow nested event loops
+    import nest_asyncio
+    nest_asyncio.apply()
+    
+    # Create a new event loop for this request
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(bot_app.process_update(update))
+    finally:
+        loop.close()
+    
+    logger.info("✅ Update processed")
+except Exception as e:
+    logger.error(f"❌ Webhook error: {e}", exc_info=True)
+    return "Error", 500
     
     return "OK", 200
 
@@ -993,6 +1001,7 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
 
 
 
