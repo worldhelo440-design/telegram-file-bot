@@ -302,7 +302,7 @@ async def check_and_delete_due_messages(bot):
     
     save_deletions()
     # Backup deletions to Telegram
-    await backup_to_telegram(bot_app.bot, 'deletion', scheduled_deletions, 'scheduled_deletions.json')
+    # await backup_to_telegram(bot_app.bot, 'deletion', scheduled_deletions, 'scheduled_deletions.json')
     logger.info(f"✅ Processed {len(to_delete)} overdue deletions")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -989,3 +989,4 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
