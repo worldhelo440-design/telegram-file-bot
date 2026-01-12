@@ -744,11 +744,12 @@ async def upload_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Admin only!")
         return
     
+    # Fixed message without problematic Markdown
     await update.message.reply_text(
-        "📤 **Upload JSON**\n\n"
-        "Reply to this message with your JSON file.\n"
-        "Supported: payload_data.json",
-        parse_mode='Markdown'
+        "📤 Upload JSON File\n\n"
+        "Send your payload_data.json file now.\n"
+        "I'll process it automatically.",
+        parse_mode=None  # No parsing to avoid errors
     )
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -757,36 +758,50 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"📨 Message received from user {update.effective_user.id}")
     user_id = update.effective_user.id
     
-    # Handle JSON file upload
+    # Handle JSON file upload - IMPROVED DETECTION
     if update.message.document and user_id == ADMIN_ID:
-        if update.message.reply_to_message:
-            reply_text = update.message.reply_to_message.text
-            if reply_text and "Upload JSON" in reply_text:
-                doc = update.message.document
-                if doc.file_name.endswith('.json'):
-                    try:
-                        file = await context.bot.get_file(doc.file_id)
-                        file_bytes = await file.download_as_bytearray()
-                        json_str = file_bytes.decode('utf-8')
-                        new_data = json.loads(json_str)
-                        
-                        global payload_data
-                        payload_data = new_data
-                        save_payloads()
-                        
-                        # Backup to Telegram
-                        await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json')
-                        
-                        await update.message.reply_text(
-                            f"✅ **Payload data updated!**\n\n"
-                            f"📦 Loaded {len(payload_data)} payloads\n"
-                            f"☁️ Backed up to cloud",
-                            parse_mode='Markdown'
-                        )
-                        return
-                    except Exception as e:
-                        await update.message.reply_text(f"❌ Error: {str(e)}")
-                        return
+        doc = update.message.document
+        
+        # Check if it's a JSON file
+        if doc.file_name and doc.file_name.endswith('.json'):
+            logger.info(f"📄 JSON file received: {doc.file_name}")
+            
+            try:
+                # Download and parse JSON
+                file = await context.bot.get_file(doc.file_id)
+                file_bytes = await file.download_as_bytearray()
+                json_str = file_bytes.decode('utf-8')
+                new_data = json.loads(json_str)
+                
+                # Update payload data
+                global payload_data
+                payload_data = new_data
+                save_payloads()
+                
+                # Backup to Telegram
+                await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json')
+                
+                logger.info(f"✅ Loaded {len(payload_data)} payloads from uploaded file")
+                
+                # Send success message without Markdown
+                await update.message.reply_text(
+                    f"✅ Payload data updated!\n\n"
+                    f"📦 Loaded {len(payload_data)} payloads\n"
+                    f"☁️ Backed up to cloud",
+                    parse_mode=None
+                )
+                return
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Invalid JSON: {e}")
+                await update.message.reply_text(
+                    f"❌ Invalid JSON file!\n\nError: {str(e)}"
+                )
+                return
+            except Exception as e:
+                logger.error(f"❌ Upload error: {e}")
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+                return
     
     # Caption setting
     if update.message.reply_to_message:
@@ -825,6 +840,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = len(admin_sessions[user_id]["files"])
         logger.info(f"✅ File #{count} added to collection")
         await update.message.reply_text(f"✅ File #{count}")
+        
 
 def keep_alive_sync():
     """Keep the service alive by pinging itself every 10 minutes"""
@@ -897,30 +913,30 @@ async def notify_admin_restart():
         
         await check_and_delete_due_messages(bot_app.bot)
         
-        # Fixed message with proper Markdown escaping
+        # Fixed message without problematic Markdown
         message = (
-            "🔄 **Bot Restarted!**\n\n"
+            "🔄 Bot Restarted!\n\n"
             "All systems online and ready.\n\n"
-            "**Commands:**\n"
-            "• /startp <name>\n"
-            "• /stopp\n"
-            "• /setcaption\n"
-            "• /status\n"
-            "• /listpayloads\n"
-            "• /deletepayload <code>\n"
-            "• /pending\n"
-            "• /checkdeletions\n\n"
-            "**Cloud Backup:**\n"
-            "• /backupnow\n"
-            "• /restorefromcloud\n"
-            "• /downloadjson\n"
-            "• /uploadjson"
+            "Commands:\n"
+            "• /startp - Start collection\n"
+            "• /stopp - Finish collection\n"
+            "• /setcaption - Set messages\n"
+            "• /status - View payloads\n"
+            "• /listpayloads - List all\n"
+            "• /deletepayload - Delete one\n"
+            "• /pending - View deletions\n"
+            "• /checkdeletions - Process overdue\n\n"
+            "Cloud Backup:\n"
+            "• /backupnow - Backup all\n"
+            "• /restorefromcloud - Restore\n"
+            "• /downloadjson - Download\n"
+            "• /uploadjson - Upload JSON"
         )
         
         await bot_app.bot.send_message(
             chat_id=ADMIN_ID,
             text=message,
-            parse_mode='Markdown'
+            parse_mode=None  # No parsing to avoid errors
         )
         logger.info("✅ Admin notified of restart")
     except Exception as e:
@@ -1021,6 +1037,7 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
 
 
 
