@@ -756,8 +756,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle JSON file upload
     if update.message.document and user_id == ADMIN_ID:
         if update.message.reply_to_message:
-            reply_text = update.message.reply_to_message.text or ""
-            if "Upload JSON" in reply_text:
+            reply_text = update.message.reply_to_message.text
+            if reply_text and "Upload JSON" in reply_text:
                 doc = update.message.document
                 if doc.file_name.endswith('.json'):
                     try:
@@ -989,4 +989,5 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
 
