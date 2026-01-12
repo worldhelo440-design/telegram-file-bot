@@ -871,15 +871,19 @@ async def notify_admin_restart():
         logger.error(f"❌ Could not notify admin: {e}")
 
 def keep_alive_sync():
-    """Keep the service alive"""
+    """Keep the service alive by pinging itself every 10 minutes"""
     while True:
-        time.sleep(600)
+        time.sleep(600)  # 10 minutes = 600 seconds
         try:
             if WEBHOOK_URL:
-                requests.get(f"{WEBHOOK_URL}/health", timeout=5)
-                logger.info("💓 Keep-alive ping sent")
+                ping_url = f"{WEBHOOK_URL}/health"
+                response = requests.get(ping_url, timeout=10)
+                if response.status_code == 200:
+                    logger.info("💓 Keep-alive ping SUCCESS")
+                else:
+                    logger.warning(f"⚠️ Keep-alive ping returned: {response.status_code}")
         except Exception as e:
-            logger.error(f"Keep-alive ping failed: {e}")
+            logger.error(f"❌ Keep-alive ping failed: {e}")
 
 @app.route('/')
 def index():
