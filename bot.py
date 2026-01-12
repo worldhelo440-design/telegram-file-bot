@@ -734,6 +734,71 @@ async def download_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+async def notify_admin_restart():
+    """Notify admin that bot restarted and ask for JSON upload"""
+    try:
+        await asyncio.sleep(2)
+        
+        await check_and_delete_due_messages(bot_app.bot)
+        
+        # Check if we have existing data
+        has_data = len(payload_data) > 0
+        
+        if has_data:
+            # Bot has existing data
+            message = (
+                "🔄 Bot Restarted!\n\n"
+                f"📦 Current payloads: {len(payload_data)}\n"
+                f"⏰ Pending deletions: {len(scheduled_deletions)}\n\n"
+                "All systems online and ready.\n\n"
+                "Commands:\n"
+                "• /startp - Start collection\n"
+                "• /stopp - Finish collection\n"
+                "• /status - View payloads\n"
+                "• /listpayloads - List all\n"
+                "• /uploadjson - Upload new data\n"
+                "• /backupnow - Backup to cloud\n"
+                "• /downloadjson - Download current data"
+            )
+        else:
+            # No data found - ask for upload
+            message = (
+                "🔄 Bot Restarted!\n\n"
+                "⚠️ No payload data found!\n\n"
+                "📤 UPLOAD YOUR JSON FILE NOW\n\n"
+                "Send your payload_data.json file\n"
+                "within the next 60 seconds.\n\n"
+                "I'll process it automatically."
+            )
+        
+        await bot_app.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=message,
+            parse_mode=None
+        )
+        logger.info("✅ Admin notified of restart")
+        
+        # If no data, send a follow-up reminder after 30 seconds
+        if not has_data:
+            await asyncio.sleep(30)
+            
+            # Check again if data was uploaded
+            if len(payload_data) == 0:
+                await bot_app.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=(
+                        "⏰ 30 seconds left!\n\n"
+                        "📤 Send payload_data.json file now\n"
+                        "or use /downloadjson from old bot\n\n"
+                        "Bot is waiting..."
+                    ),
+                    parse_mode=None
+                )
+                logger.info("⏰ Sent upload reminder")
+                
+    except Exception as e:
+        logger.error(f"❌ Could not notify admin: {e}")
+
 
 async def upload_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Upload and set payload data from JSON file"""
@@ -755,6 +820,7 @@ async def upload_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• scheduled_deletions.json",
         parse_mode=None
     )
+
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_and_delete_due_messages(context.bot)
@@ -882,6 +948,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = len(admin_sessions[user_id]["files"])
         logger.info(f"✅ File #{count} added to collection")
         await update.message.reply_text(f"✅ File #{count}")
+
 
 def keep_alive_sync():
     """Keep the service alive by pinging itself every 10 minutes"""
@@ -1100,6 +1167,7 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
 
 
 
