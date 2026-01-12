@@ -729,4 +729,321 @@ async def upload_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await
+    await check_and_delete_due_messages(context.bot)
+    
+    logger.info(f"📨 Message received from user {update.effective_user.id}")
+    user_id = update.effective_user.id
+    
+    if update.message.document and user_id == ADMIN_ID:
+        doc = update.message.document
+        
+        if doc.file_name and doc.file_name.endswith('.json'):
+            logger.info(f"📄 JSON file received: {doc.file_name}")
+            
+            processing_msg = await update.message.reply_text("⏳ Processing JSON file...")
+            
+            try:
+                file = await context.bot.get_file(doc.file_id)
+                file_bytes = await file.download_as_bytearray()
+                json_str = file_bytes.decode('utf-8')
+                new_data = json.loads(json_str)
+                
+                if 'name' in str(new_data) and 'files' in str(new_data):
+                    global payload_data
+                    old_count = len(payload_data)
+                    payload_data = new_data
+                    save_payloads()
+                    
+                    await backup_to_telegram(context.bot, 'payload', payload_data, 'payload_data.json')
+                    
+                    logger.info(f"✅ Loaded {len(payload_data)} payloads from uploaded file")
+                    
+                    await processing_msg.delete()
+                    
+                    await update.message.reply_text(
+                        f"✅ Payload Data Uploaded!\n\n"
+                        f"📦 Previous: {old_count} payloads\n"
+                        f"📦 New: {len(payload_data)} payloads\n"
+                        f"☁️ Backed up to Telegram cloud\n\n"
+                        f"🚀 Bot is ready to use!",
+                        parse_mode=None
+                    )
+                    return
+                
+                elif 'start_caption' in new_data or 'end_caption' in new_data:
+                    global caption_data
+                    caption_data = new_data
+                    save_captions()
+                    await backup_to_telegram(context.bot, 'caption', caption_data, 'caption_data.json')
+                    
+                    await processing_msg.delete()
+                    await update.message.reply_text(
+                        "✅ Caption Data Uploaded!\n\n☁️ Backed up to cloud",
+                        parse_mode=None
+                    )
+                    return
+                
+                else:
+                    await processing_msg.delete()
+                    await update.message.reply_text(
+                        "⚠️ Unknown JSON format!\n\n"
+                        "Expected: payload_data.json or caption_data.json"
+                    )
+                    return
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Invalid JSON: {e}")
+                await processing_msg.delete()
+                await update.message.reply_text(f"❌ Invalid JSON file!\n\nError: {str(e)}")
+                return
+            except Exception as e:
+                logger.error(f"❌ Upload error: {e}")
+                await processing_msg.delete()
+                await update.message.reply_text(f"❌ Error: {str(e)}")
+                return
+    
+    if update.message.reply_to_message:
+        reply_text = update.message.reply_to_message.text
+        if reply_text and "Set Captions" in reply_text and user_id == ADMIN_ID:
+            text = update.message.text
+            
+            if text.upper() == 'CLEAR':
+                caption_data["start_caption"] = ""
+                caption_data["end_caption"] = ""
+                save_captions()
+                await backup_to_telegram(context.bot, 'caption', caption_data, 'caption_data.json')
+                await update.message.reply_text("✅ Captions cleared and backed up!")
+                return
+            
+            if 'START:' in text:
+                parts = text.split('START:')
+                if len(parts) > 1:
+                    start = parts[1].split('END:')[0].strip()
+                    caption_data["start_caption"] = start
+            
+            if 'END:' in text:
+                parts = text.split('END:')
+                if len(parts) > 1:
+                    caption_data["end_caption"] = parts[1].strip()
+            
+            save_captions()
+            await backup_to_telegram(context.bot, 'caption', caption_data, 'caption_data.json')
+            await update.message.reply_text("✅ Captions updated and backed up!")
+            return
+    
+    if user_id == ADMIN_ID and user_id in admin_sessions:
+        message_id = update.message.message_id
+        admin_sessions[user_id]["files"].append(message_id)
+        count = len(admin_sessions[user_id]["files"])
+        logger.info(f"✅ File #{count} added to collection")
+        await update.message.reply_text(f"✅ File #{count}")
+
+async def notify_admin_restart():
+    """Notify admin that bot restarted"""
+    try:
+        await asyncio.sleep(2)
+        
+        await check_and_delete_due_messages(bot_app.bot)
+        
+        has_data = len(payload_data) > 0
+        
+        if has_data:
+            message = (
+                "🔄 Bot Restarted!\n\n"
+                f"📦 Payloads: {len(payload_data)}\n"
+                f"⏰ Deletions: {len(scheduled_deletions)}\n\n"
+                "✅ Ready to use!"
+            )
+        else:
+            message = (
+                "🔄 Bot Restarted!\n\n"
+                "⚠️ No payload data found!\n\n"
+                "📤 Send your payload_data.json file anytime."
+            )
+        
+        await bot_app.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=message,
+            parse_mode=None
+        )
+        logger.info("✅ Admin notified of restart")
+                
+    except Exception as e:
+        logger.error(f"❌ Could not notify admin: {e}")
+
+def keep_alive_sync():
+    """Keep the service alive by pinging itself every 10 minutes"""
+    while True:
+        time.sleep(600)  # 10 minutes = 600 seconds
+        try:
+            if WEBHOOK_URL:
+                ping_url = f"{WEBHOOK_URL}/health"
+                response = requests.get(ping_url, timeout=10)
+                if response.status_code == 200:
+                    logger.info("💓 Keep-alive ping SUCCESS")
+                else:
+                    logger.warning(f"⚠️ Keep-alive ping returned: {response.status_code}")
+        except Exception as e:
+            logger.error(f"❌ Keep-alive ping failed: {e}")
+
+@app.route('/')
+def index():
+    return "Bot running! 🚀", 200
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+@app.route('/<token>', methods=['POST'])
+def webhook(token):
+    """Handle incoming webhook updates"""
+    
+    if token != BOT_TOKEN:
+        logger.error(f"❌ Invalid token in webhook: {token}")
+        return "Unauthorized", 401
+    
+    logger.info("🔔 Webhook received!")
+    
+    if not bot_app or not bot_loop:
+        logger.error("❌ Bot app or loop not initialized!")
+        return "Bot not ready", 503
+    
+    try:
+        update_data = request.get_json(force=True)
+        logger.info(f"📦 Update received")
+        
+        update = Update.de_json(update_data, bot_app.bot)
+        
+        # ✅ FIX: Schedule coroutine in the persistent event loop
+        future = asyncio.run_coroutine_threadsafe(
+            bot_app.process_update(update),
+            bot_loop
+        )
+        
+        # Wait for completion (with timeout)
+        try:
+            future.result(timeout=30)  # 30 second timeout
+            logger.info("✅ Update processed")
+        except Exception as e:
+            logger.error(f"❌ Update processing error: {e}")
+        
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        return "Error", 500
+    
+    return "OK", 200
+
+def run_flask():
+    """Run Flask"""
+    logger.info(f"🌐 Flask starting on port {PORT}")
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+
+def run_event_loop(loop):
+    """Run the asyncio event loop in a separate thread"""
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+def main():
+    """Main function"""
+    global bot_app, bot_loop
+    
+    logger.info("=" * 60)
+    logger.info("🚀 TELEGRAM BOT STARTING - CLOUD BACKUP VERSION")
+    logger.info("=" * 60)
+    logger.info(f"📝 BOT_TOKEN: {'SET ✅' if BOT_TOKEN else 'MISSING ❌'}")
+    logger.info(f"👤 ADMIN_ID: {ADMIN_ID}")
+    logger.info(f"🌐 WEBHOOK_URL: {WEBHOOK_URL if WEBHOOK_URL else 'MISSING ❌'}")
+    logger.info(f"🔌 PORT: {PORT}")
+    logger.info("=" * 60)
+    
+    if not WEBHOOK_URL:
+        logger.warning("⚠️ WEBHOOK_URL not set - webhook will not work!")
+    
+    load_backup_ids()
+    load_data()
+    
+    logger.info("🤖 Creating bot application...")
+    bot_app = Application.builder().token(BOT_TOKEN).updater(None).build()
+    
+    logger.info("📌 Adding handlers...")
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("startp", start_payload))
+    bot_app.add_handler(CommandHandler("stopp", stop_payload))
+    bot_app.add_handler(CommandHandler("setcaption", set_caption))
+    bot_app.add_handler(CommandHandler("status", status))
+    bot_app.add_handler(CommandHandler("listpayloads", list_payloads))
+    bot_app.add_handler(CommandHandler("deletepayload", delete_payload))
+    bot_app.add_handler(CommandHandler("pending", pending_deletions))
+    bot_app.add_handler(CommandHandler("checkdeletions", check_deletions_command))
+    bot_app.add_handler(CommandHandler("backupnow", backup_now))
+    bot_app.add_handler(CommandHandler("restorefromcloud", restore_from_cloud))
+    bot_app.add_handler(CommandHandler("downloadjson", download_json))
+    bot_app.add_handler(CommandHandler("uploadjson", upload_json))
+    bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
+    
+    # ✅ Create persistent event loop
+    logger.info("🔄 Creating persistent event loop...")
+    bot_loop = asyncio.new_event_loop()
+    
+    # ✅ Start event loop in separate thread
+    loop_thread = Thread(target=run_event_loop, args=(bot_loop,), daemon=True)
+    loop_thread.start()
+    logger.info("✅ Event loop thread started")
+    
+    logger.info("⚙️ Initializing bot...")
+    future = asyncio.run_coroutine_threadsafe(bot_app.initialize(), bot_loop)
+    future.result()  # Wait for initialization
+    
+    logger.info("☁️ Checking for cloud backups...")
+    future = asyncio.run_coroutine_threadsafe(load_data_from_telegram(bot_app.bot), bot_loop)
+    future.result()  # Wait for loading
+    
+    if WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
+        logger.info(f"🔗 Setting webhook: {webhook_url}")
+        
+        logger.info("🗑️ Deleting old webhook...")
+        future = asyncio.run_coroutine_threadsafe(
+            bot_app.bot.delete_webhook(drop_pending_updates=True),
+            bot_loop
+        )
+        future.result()
+        
+        time.sleep(2)
+        
+        future = asyncio.run_coroutine_threadsafe(
+            bot_app.bot.set_webhook(url=webhook_url),
+            bot_loop
+        )
+        future.result()
+        logger.info("✅ Webhook configured!")
+        
+        future = asyncio.run_coroutine_threadsafe(bot_app.bot.get_webhook_info(), bot_loop)
+        webhook_info = future.result()
+        logger.info(f"📡 Webhook URL: {webhook_info.url}")
+        logger.info(f"📡 Pending updates: {webhook_info.pending_update_count}")
+        
+        future = asyncio.run_coroutine_threadsafe(notify_admin_restart(), bot_loop)
+        future.result()
+    
+    if WEBHOOK_URL:
+        keep_alive_thread = Thread(target=keep_alive_sync, daemon=True)
+        keep_alive_thread.start()
+        logger.info("💓 Keep-alive thread started")
+    
+    logger.info("=" * 60)
+    logger.info("✅ BOT IS READY - CLOUD BACKUP ENABLED!")
+    logger.info("=" * 60)
+    
+    run_flask()
+
+if __name__ == "__main__":
+    try:
+        import nest_asyncio
+    except ImportError:
+        import subprocess
+        import sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "nest_asyncio"])
+        import nest_asyncio
+    
+    main()
