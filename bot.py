@@ -869,14 +869,10 @@ def webhook(token):
     # Use nest_asyncio to allow nested event loops
     import nest_asyncio
     nest_asyncio.apply()
-    
-    # Create a new event loop for this request
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(bot_app.process_update(update))
-    finally:
-        loop.close()
+    loop.run_until_complete(bot_app.process_update(update))
+    loop.close()
     
     logger.info("✅ Update processed")
 except Exception as e:
@@ -1001,6 +997,7 @@ if __name__ == "__main__":
         import nest_asyncio
     
     main()
+
 
 
 
