@@ -837,28 +837,8 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"✅ File #{count} added to collection")
         await update.message.reply_text(f"✅ File #{count}")
 
-async def send_delayed_reminder():
-    """Send reminder after 30 seconds if no data uploaded"""
-    await asyncio.sleep(30)
-    
-    if len(payload_data) == 0:
-        try:
-            await bot_app.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    "⏰ Reminder!\n\n"
-                    "📤 Send payload_data.json file now\n"
-                    "or use /downloadjson from old bot\n\n"
-                    "Bot is ready and waiting..."
-                ),
-                parse_mode=None
-            )
-            logger.info("⏰ Sent upload reminder")
-        except Exception as e:
-            logger.error(f"❌ Could not send reminder: {e}")
-
 async def notify_admin_restart():
-    """Notify admin that bot restarted and ask for JSON upload"""
+    """Notify admin that bot restarted"""
     try:
         await asyncio.sleep(2)
         
@@ -869,25 +849,15 @@ async def notify_admin_restart():
         if has_data:
             message = (
                 "🔄 Bot Restarted!\n\n"
-                f"📦 Current payloads: {len(payload_data)}\n"
-                f"⏰ Pending deletions: {len(scheduled_deletions)}\n\n"
-                "All systems online and ready.\n\n"
-                "Commands:\n"
-                "• /startp - Start collection\n"
-                "• /stopp - Finish collection\n"
-                "• /status - View payloads\n"
-                "• /listpayloads - List all\n"
-                "• /uploadjson - Upload new data\n"
-                "• /backupnow - Backup to cloud\n"
-                "• /downloadjson - Download current data"
+                f"📦 Payloads: {len(payload_data)}\n"
+                f"⏰ Deletions: {len(scheduled_deletions)}\n\n"
+                "✅ Ready to use!"
             )
         else:
             message = (
                 "🔄 Bot Restarted!\n\n"
                 "⚠️ No payload data found!\n\n"
-                "📤 UPLOAD YOUR JSON FILE NOW\n\n"
-                "Send your payload_data.json file.\n"
-                "I'll process it automatically."
+                "📤 Send your payload_data.json file anytime."
             )
         
         await bot_app.bot.send_message(
@@ -896,10 +866,6 @@ async def notify_admin_restart():
             parse_mode=None
         )
         logger.info("✅ Admin notified of restart")
-        
-        # Schedule reminder in background if no data
-        if not has_data:
-            asyncio.create_task(send_delayed_reminder())
                 
     except Exception as e:
         logger.error(f"❌ Could not notify admin: {e}")
@@ -943,15 +909,8 @@ def webhook(token):
         
         update = Update.de_json(update_data, bot_app.bot)
         
-        import nest_asyncio
-        nest_asyncio.apply()
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(bot_app.process_update(update))
-        finally:
-            loop.close()
+        # Process update in existing event loop
+        asyncio.run(bot_app.process_update(update))
         
         logger.info("✅ Update processed")
     except Exception as e:
