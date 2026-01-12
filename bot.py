@@ -837,6 +837,26 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"✅ File #{count} added to collection")
         await update.message.reply_text(f"✅ File #{count}")
 
+async def send_delayed_reminder():
+    """Send reminder after 30 seconds if no data uploaded"""
+    await asyncio.sleep(30)
+    
+    if len(payload_data) == 0:
+        try:
+            await bot_app.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    "⏰ Reminder!\n\n"
+                    "📤 Send payload_data.json file now\n"
+                    "or use /downloadjson from old bot\n\n"
+                    "Bot is ready and waiting..."
+                ),
+                parse_mode=None
+            )
+            logger.info("⏰ Sent upload reminder")
+        except Exception as e:
+            logger.error(f"❌ Could not send reminder: {e}")
+
 async def notify_admin_restart():
     """Notify admin that bot restarted and ask for JSON upload"""
     try:
@@ -866,8 +886,7 @@ async def notify_admin_restart():
                 "🔄 Bot Restarted!\n\n"
                 "⚠️ No payload data found!\n\n"
                 "📤 UPLOAD YOUR JSON FILE NOW\n\n"
-                "Send your payload_data.json file\n"
-                "within the next 60 seconds.\n\n"
+                "Send your payload_data.json file.\n"
                 "I'll process it automatically."
             )
         
@@ -878,21 +897,9 @@ async def notify_admin_restart():
         )
         logger.info("✅ Admin notified of restart")
         
+        # Schedule reminder in background if no data
         if not has_data:
-            await asyncio.sleep(30)
-            
-            if len(payload_data) == 0:
-                await bot_app.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=(
-                        "⏰ 30 seconds left!\n\n"
-                        "📤 Send payload_data.json file now\n"
-                        "or use /downloadjson from old bot\n\n"
-                        "Bot is waiting..."
-                    ),
-                    parse_mode=None
-                )
-                logger.info("⏰ Sent upload reminder")
+            asyncio.create_task(send_delayed_reminder())
                 
     except Exception as e:
         logger.error(f"❌ Could not notify admin: {e}")
